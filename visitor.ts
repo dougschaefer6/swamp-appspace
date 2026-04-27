@@ -1,7 +1,7 @@
 import { z } from "npm:zod@4.3.6";
 import {
-  AppspaceGlobalArgsSchema,
   appspaceApi,
+  AppspaceGlobalArgsSchema,
   appspacePaged,
   sanitizeId,
 } from "./_client.ts";

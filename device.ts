@@ -1,7 +1,7 @@
 import { z } from "npm:zod@4.3.6";
 import {
-  AppspaceGlobalArgsSchema,
   appspaceApi,
+  AppspaceGlobalArgsSchema,
   appspacePaged,
   sanitizeId,
 } from "./_client.ts";
@@ -95,10 +95,14 @@ export const model = {
         if (args.groupId) params.groupId = args.groupId;
         if (args.status) params.status = args.status;
 
-        const devices = await appspacePaged("/api/v3/devices", context.globalArgs, {
-          params,
-          maxItems: args.maxItems,
-        });
+        const devices = await appspacePaged(
+          "/api/v3/devices",
+          context.globalArgs,
+          {
+            params,
+            maxItems: args.maxItems,
+          },
+        );
 
         context.logger.info("Found {count} devices", { count: devices.length });
 
@@ -287,9 +291,7 @@ export const model = {
       }),
       execute: async (args, context) => {
         const config = await appspaceApi(
-          `/api/v3/devices/${
-            encodeURIComponent(args.deviceId)
-          }/configuration`,
+          `/api/v3/devices/${encodeURIComponent(args.deviceId)}/configuration`,
           context.globalArgs,
         );
         return {
@@ -309,9 +311,7 @@ export const model = {
       }),
       execute: async (args, context) => {
         const capture = await appspaceApi(
-          `/api/v3/devices/${
-            encodeURIComponent(args.deviceId)
-          }/screencapture`,
+          `/api/v3/devices/${encodeURIComponent(args.deviceId)}/screencapture`,
           context.globalArgs,
         );
         return {

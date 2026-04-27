@@ -1,8 +1,8 @@
 import { z } from "npm:zod@4.3.6";
 import { zipSync } from "npm:fflate@0.8.2";
 import {
-  AppspaceGlobalArgsSchema,
   appspaceApi,
+  AppspaceGlobalArgsSchema,
   appspacePaged,
   sanitizeId,
 } from "./_client.ts";
@@ -135,7 +135,8 @@ const INDEX_HTML_TEMPLATE = `<!doctype html>
 </html>
 `;
 
-const THUMBNAIL_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+const THUMBNAIL_SVG =
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
   <rect width="200" height="200" fill="#0F4C81"/>
   <text x="100" y="110" font-family="Arial,sans-serif" font-size="24" fill="#fff" text-anchor="middle">Card</text>
 </svg>
@@ -225,7 +226,9 @@ function validateBigThree(
     if (Array.isArray(rawModelInputs)) {
       modelInputNames = new Set(
         rawModelInputs
-          .filter((it): it is Record<string, unknown> => !!it && typeof it === "object")
+          .filter((it): it is Record<string, unknown> =>
+            !!it && typeof it === "object"
+          )
           .map((it) => (it.name as string) ?? "")
           .filter(Boolean),
       );
@@ -259,7 +262,7 @@ function validateBigThree(
 
 export const model = {
   type: "@dougschaefer/appspace-card",
-  version: "2026.04.27.2",
+  version: "2026.04.27.1",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     cardTemplateType: {

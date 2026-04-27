@@ -1,7 +1,7 @@
 import { z } from "npm:zod@4.3.6";
 import {
-  AppspaceGlobalArgsSchema,
   appspaceApi,
+  AppspaceGlobalArgsSchema,
   appspacePaged,
   sanitizeId,
 } from "./_client.ts";
@@ -176,8 +176,10 @@ export const model = {
         "Get the current user (the Service Account behind the API token). Useful for confirming token identity and inspecting account context.",
       arguments: z.object({}),
       execute: async (_args, context) => {
-        const me = await appspaceApi("/api/v3/users/me", context.globalArgs) as
-          Record<string, unknown>;
+        const me = await appspaceApi(
+          "/api/v3/users/me",
+          context.globalArgs,
+        ) as Record<string, unknown>;
         const handle = await context.writeResource(
           "me",
           sanitizeId((me.email as string) ?? "me"),
