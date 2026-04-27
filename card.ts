@@ -262,7 +262,7 @@ function validateBigThree(
 
 export const model = {
   type: "@dougschaefer/appspace-card",
-  version: "2026.04.27.1",
+  version: "2026.04.27.2",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     cardTemplateType: {
@@ -438,8 +438,12 @@ export const model = {
         excludeGlobs: z.array(z.string()).default([
           "node_modules",
           ".git",
+          ".gitignore",
+          ".gitattributes",
+          ".swamp",
           ".DS_Store",
           "dist",
+          "SOURCES.md",
         ]).describe(
           "Top-level entries to skip (matched against the entry name, not full path)",
         ),
@@ -640,7 +644,7 @@ export const model = {
 
     pullCard: {
       description:
-        "Download a card's source files from its templateUrl on the Appspace tenant. Fetches manifest/schema/model/index.html plus every script and stylesheet referenced from index.html (preserving the relative directory structure). Use this to stage an existing card for customization.",
+        "Download a card's source files from its templateUrl on the Appspace tenant. Fetches manifest/schema/model/index.html plus every script and stylesheet referenced from index.html (preserving the relative directory structure). NOTE: dynamically-loaded files (translations under console/lang/*, fonts/, console/react/*, SVG assets) are not statically referenced so they won't be picked up — if pulling a customer-customized card to re-base, the bundle may be stripped. Warns when fewer than 50 files are pulled. See README 'Card customization pitfalls'.",
       arguments: z.object({
         templateId: z.string().describe(
           "Card template instance ID (UUID). Find via listTemplates.",
@@ -752,6 +756,19 @@ export const model = {
           "Pulled {count} files ({size} bytes) into {dst}",
           { count: fetchedFiles.length, size: totalBytes, dst: args.destDir },
         );
+
+        // Heuristic warning: customer-customized cards often strip dynamically
+        // loaded files (translations, fonts, React components) that pullCard
+        // can't see because they aren't referenced from index.html. A major
+        // Appspace card type usually has 100+ entries in its full bundle —
+        // anything noticeably thinner is likely a stripped customer variant.
+        // See README "Card customization pitfalls".
+        if (args.includeAssets && fetchedFiles.length < 50) {
+          context.logger.warning(
+            "Pulled bundle has only {count} files — this looks like a stripped customer variant rather than a full Appspace card. Translations (console/lang/*.json), fonts (fonts/icomoon.*), React components (console/react/*.js), and SVG assets are typically loaded dynamically and won't be picked up by index.html scanning. For re-basing customizations, prefer downloading the official template type's full bundle from the Appspace console.",
+            { count: fetchedFiles.length },
+          );
+        }
 
         const handle = await context.writeResource(
           "cardPull",

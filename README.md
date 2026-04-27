@@ -66,6 +66,99 @@ swamp model method run my-card package --input '{
 #    returns 405 Method Not Allowed.)
 ```
 
+## Card customization pitfalls (read before re-basing on a customer's card)
+
+These are lessons from real customization work that would otherwise cost hours
+of debugging.
+
+### 1. Customer-modified cards may have stripped bundles
+
+Appspace's official Visitor Kiosk Card ships ~340 files (~50MB unpacked) —
+icon fonts, 25 language translation dictionaries, ~150 React components,
+help text, configcat, smcta SVGs. When customers customize and re-upload a
+card, their build process often strips dynamically-loaded files (anything not
+referenced statically from `index.html`). The card *runs*, but with broken
+icons (missing fonts), untranslated keys (missing `console/lang/*.json`), and
+missing UI components.
+
+**`pullCard` follows what's referenced from index.html — it can't see
+dynamically-loaded files.** If you `pullCard` a customer's customized card to
+re-base on, you inherit their stripped bundle. To avoid:
+
+- For an established Appspace card type (Visitor Kiosk, Banner, Counter, Alert,
+  etc.), **download the official template type's full bundle as a fresh
+  upload** from the Appspace console instead of pulling from a customer
+  variant. Apply the customer's customization JS patch on top.
+- A bundle with fewer than ~100 files is suspiciously thin for a major card
+  type. If `pullCard` returns 22 files, you almost certainly have a stripped
+  bundle.
+
+### 2. AngularJS template overrides — `$templateCache` races
+
+The customer-bundled `templates-*.js` registers all card templates against a
+specific module (often `as.console`). If your patch puts a template into
+`$templateCache` from a different module's `.run()` block, AngularJS
+load-order doesn't guarantee yours wins. Symptom: your customizations don't
+appear at runtime, even though the patch script clearly loads.
+
+**Robust pattern**: use `$provide.decorator()` to override the *directive
+definition object* directly:
+
+```js
+angular.module("as.guests").config(["$provide", function ($provide) {
+  $provide.decorator("yourDirectiveDirective", ["$delegate", function ($delegate) {
+    var ddo = $delegate[0];
+    ddo.template = "<div>...</div>";  // inline template — bypasses $templateCache
+    delete ddo.templateUrl;
+    ddo.controller = ["yourDeps", function (yourDeps) { /* ... */ }];
+    return $delegate;
+  }]);
+}]);
+```
+
+This sets the template on the directive itself; nothing else can override it.
+
+### 3. New screens — use UI Router states, not in-place ng-show toggles
+
+If your customization adds a new "screen" (form, confirmation, etc.), register
+it as a new state via `$stateProvider.state(...)` in a config block on
+`as.guests`:
+
+```js
+angular.module("as.guests").config(["$stateProvider", function ($stateProvider) {
+  $stateProvider.state("guests.visitors.kiosk.walkin", { component: "visitorsKioskWalkin" });
+}]);
+```
+
+Navigate with `visitorKioskHelper.goNext("walkin")`. This makes your screen
+behave like a real kiosk state — the Cancel/Back buttons in the kiosk shell
+auto-render, the state machine handles transitions, and your component lifecycle
+runs (`$onInit`, `$onDestroy`).
+
+### 4. CSS injection timing
+
+If you need to inject CSS to hide platform UI elements, the `<style>` tag
+needs to land in `document.head` AFTER all platform stylesheets, with
+sufficient selector specificity to win. Some kiosk runtimes don't have
+`document.head` ready when the patch script first runs — inject from BOTH a
+synchronous IIFE (works for normal browsers) AND a `.run()` block fired
+through `$timeout(0)` after Angular bootstrap (catches the late-DOM cases).
+
+### 5. Hidden v3 endpoints
+
+The public OpenAPI at `/api/v3/<service>/openapi` significantly
+underrepresents the API surface. Notable hidden endpoints we discovered by
+reading the bundled JS:
+
+- `POST /api/v3/visitormanagement/visitors` — create a visitor (OpenAPI only
+  shows DELETE/PATCH on `/visitors/{id}`)
+- `POST /api/v3/visitormanagement/invitations` — create an invitation
+  (`type: "DropIn"` for walk-ins). This is what fires the host-notification
+  chain (Teams Passport bot, Concierge fan-out, Appspace app push, email).
+
+When the public OpenAPI says something is impossible, grep the card bundle's
+`app-*-min.js` for the function name; the real endpoint is usually there.
+
 ## Authentication
 
 Appspace API v3 uses a Subject ID + Refresh Token pair. Both are issued at
