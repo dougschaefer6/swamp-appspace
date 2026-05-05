@@ -40,6 +40,14 @@ const TaskDeploymentSchema = z.object({
   status: z.string().optional(),
 }).passthrough();
 
+/**
+ * `@dougschaefer/appspace-device` model — manage Appspace player devices on
+ * a tenant. Covers listing, status reporting, device properties (get/set/
+ * delete, case-sensitive lowercase keys), one-shot commands (reboot,
+ * refresh, screenshot), pre-deployed integrations, and asynchronous task
+ * deployments with response polling. Property writes and command sends
+ * propagate through Appspace's device messaging bus.
+ */
 export const model = {
   type: "@dougschaefer/appspace-device",
   version: "2026.04.27.1",

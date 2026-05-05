@@ -14,7 +14,7 @@ customization).
 | `@dougschaefer/appspace-reservation` | Room reservations, events, resources | listEvents, getEvent, cancelEvent, endEvent, extendEvent, releaseEvent, checkinEvent, listReservations, getReservation, createReservation, updateReservation, deleteReservation, listReservableResources, getMyEvents, checkUserAvailability, getSchedule |
 | `@dougschaefer/appspace-user` | User directory + groups | list, get, findByEmail, me, listGroups, getGroupMembers |
 | `@dougschaefer/appspace-visitor` | Visitor Management + walk-in DropIn workflow | list, get, create, delete, getConfiguration, createDropInInvitation, listEvents, checkin, checkout |
-| `@dougschaefer/appspace-card` | Custom card development + REST instance management | scaffold, pullCard, validate, build, package, listTemplateTypes, listTemplates, getTemplate, createTemplate, updateTemplate |
+| `@dougschaefer/appspace-card` | Custom card development + REST instance management + channel/content inspection | scaffold, pullCard, validate, build, package, listTemplateTypes, listTemplates, getTemplate, createTemplate, updateTemplate, inspectChannel, getContentModel |
 
 ### Walk-in workflow (one method call)
 
@@ -65,6 +65,34 @@ swamp model method run my-card package --input '{
 #    NOT expose a card-template-type upload endpoint — POST cardtemplatetypes
 #    returns 405 Method Not Allowed.)
 ```
+
+### Inspecting deployed channel content (debugging "is the kiosk seeing what I configured?")
+
+When a card is added to a channel, Appspace makes a content item with its
+own per-instance `model.json` overrides — distinct from the library
+template's defaults. The kiosk runtime consumes those overrides, not the
+template defaults. So when a configured value isn't behaving as expected,
+the authoritative answer is the live `model.json` on the content item.
+
+```bash
+# Probe a channel: returns channel metadata + every playlist item + the
+# deployed model.json for each card item (the live per-instance config).
+swamp model method run my-card inspectChannel --input '{
+  "channelId": "<appspace-channel-uuid>"
+}'
+
+# Or, if you only have a contentId (e.g., from a playlist item), pull
+# its deployed model.json directly:
+swamp model method run my-card getContentModel --input '{
+  "contentId": "<appspace-content-uuid>"
+}'
+```
+
+Both methods write a `contentModel` resource named `<contentId>-v<version>`
+whose `inputs` field holds the same shape as the card's `model.json` —
+each schema input with its currently-saved value. Use this to verify host
+UUIDs, host emails, copy strings, and toggle states match what was
+intended.
 
 ## Card customization pitfalls (read before re-basing on a customer's card)
 

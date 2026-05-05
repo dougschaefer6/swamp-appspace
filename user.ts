@@ -31,6 +31,14 @@ const UserGroupSchema = z.object({
   roles: z.array(z.record(z.string(), z.unknown())).optional(),
 }).passthrough();
 
+/**
+ * `@dougschaefer/appspace-user` model — directory and identity lookups on an
+ * Appspace tenant. Covers list, get-by-id, current-user (`me`), find-by-
+ * email (paginated client-side because the `?email=` filter is silently
+ * ignored), group membership listing, and group-member enumeration. The
+ * user shape exposes both `id` (the tenant-local UUID) and `cloudGuid`
+ * (the cross-tenant identity) — these are distinct.
+ */
 export const model = {
   type: "@dougschaefer/appspace-user",
   version: "2026.04.27.1",

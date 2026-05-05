@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@dougschaefer/appspace"
-version: "2026.04.27.2"
+version: "2026.05.05.1"
 description: "Appspace Cloud v3 API administration toolkit — devices, reservations, users, visitors, and the custom card development lifecycle (scaffold, pull existing, validate, package, register instances). Walk-in workflows fire DropIn invitations through Appspace's native notification routing (Teams Passport, in-app push, Concierge) with no external webhook required."
 repository: https://github.com/dougschaefer6/swamp-appspace
 additionalFiles:

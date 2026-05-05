@@ -50,6 +50,15 @@ const ReservableResourceSchema = z.object({
   reservableStatus: z.string().optional(),
 }).passthrough();
 
+/**
+ * `@dougschaefer/appspace-reservation` model — room and desk reservations on
+ * Appspace Cloud. Covers reservable resources, event lifecycle (list, get,
+ * cancel, end, extend, release, checkin), reservation CRUD, host
+ * availability lookups, and per-resource schedule pulls. The reservable-
+ * resource shape uses `id`/`name`/`type` at the top level (not the
+ * `resourceId`/`resourceName`/`resourceType` triple — that variant only
+ * shows up nested inside event resource references).
+ */
 export const model = {
   type: "@dougschaefer/appspace-reservation",
   version: "2026.04.27.1",

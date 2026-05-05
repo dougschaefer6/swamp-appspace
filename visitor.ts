@@ -42,6 +42,15 @@ const InvitationSchema = z.object({
   resourceIds: z.array(z.string()).optional(),
 }).passthrough();
 
+/**
+ * `@dougschaefer/appspace-visitor` model — visitor management lifecycle on
+ * Appspace Cloud. Covers visitor records (list, get, create, delete),
+ * configuration, drop-in invitations (the kiosk walk-in / procurement
+ * flow), event listing for a visitor, and check-in / check-out actions.
+ * Bare `createVisitor` does NOT trigger host notifications; pair with a
+ * DropIn invitation against a host UUID to fire Appspace's configured
+ * notification routing (Teams Passport, in-app push, Concierge, email).
+ */
 export const model = {
   type: "@dougschaefer/appspace-visitor",
   version: "2026.04.27.1",

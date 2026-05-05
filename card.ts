@@ -50,6 +50,38 @@ const CardPullSchema = z.object({
   totalBytes: z.number(),
 }).passthrough();
 
+const ChannelSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  accountId: z.string().optional(),
+  type: z.number().optional(),
+  publishingTargets: z.array(z.unknown()).optional(),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+}).passthrough();
+
+const ChannelPlaylistItemSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  channelId: z.string(),
+  contentId: z.string(),
+  type: z.string().optional(),
+  contentTemplateType: z.string().optional(),
+  contentTemplateTypeId: z.string().optional(),
+  contentURL: z.string().optional(),
+  position: z.number().optional(),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+}).passthrough();
+
+const ContentModelSchema = z.object({
+  contentId: z.string(),
+  version: z.string(),
+  modelUrl: z.string(),
+  inputs: z.unknown(),
+  customData: z.unknown().optional(),
+}).passthrough();
+
 const MANIFEST_TEMPLATE = (id: string, name: string, developer: string) => ({
   Id: id,
   Name: name,
@@ -260,9 +292,78 @@ function validateBigThree(
   return warnings;
 }
 
+/**
+ * Fetch the deployed model.json from a content item's contentURL, parse it,
+ * and write a contentModel resource. Returns the data handle, or null when
+ * the URL doesn't match the expected /contents/.../<version>/index.html
+ * shape. Strips the host so the call routes through appspaceApi (which
+ * handles auth, redirects, and 5xx). When the deployed bundle has been
+ * served via a CDN that strips the Authorization header on the redirect,
+ * we fall back to a bare fetch — the CDN URL typically carries its own
+ * signed access token at that point.
+ */
+async function fetchAndStoreContentModel(
+  contentId: string,
+  contentURL: string,
+  // deno-lint-ignore no-explicit-any
+  context: any,
+): Promise<unknown | null> {
+  const versionMatch = contentURL.match(/\/(\d+)\/index\.html(?:\?|#|$)/);
+  const version = versionMatch ? versionMatch[1] : "unknown";
+  const modelUrl = contentURL.replace(/\/index\.html(\?|#|$)/, "/model.json$1");
+
+  let path: string;
+  try {
+    path = new URL(modelUrl).pathname + (new URL(modelUrl).search ?? "");
+  } catch {
+    path = modelUrl;
+  }
+
+  let model: Record<string, unknown>;
+  try {
+    model = await appspaceApi(path, context.globalArgs) as Record<
+      string,
+      unknown
+    >;
+  } catch (apiErr) {
+    // CDN redirect may have stripped the Authorization header. Try a bare
+    // fetch — the redirected CDN URL typically has its own signed token.
+    const resp = await fetch(modelUrl, { redirect: "follow" });
+    if (!resp.ok) {
+      throw new Error(
+        `appspaceApi failed (${apiErr}) and fallback fetch returned ${resp.status} ${resp.statusText}`,
+      );
+    }
+    model = await resp.json();
+  }
+
+  return await context.writeResource(
+    "contentModel",
+    sanitizeId(`${contentId}-v${version}`),
+    {
+      contentId,
+      version,
+      modelUrl,
+      inputs: model.inputs,
+      customData: model.customData,
+    },
+  );
+}
+
+/**
+ * `@dougschaefer/appspace-card` model — the custom card development lifecycle
+ * for Appspace Cloud v3 plus channel/content inspection. Methods cover
+ * scaffolding new card projects, validating the manifest/schema/model trio,
+ * pulling existing cards from a tenant, packaging into an upload-ready zip,
+ * registering and updating template instances via the libraries API, and
+ * inspecting deployed channel content (the `inspectChannel` and
+ * `getContentModel` methods read the per-instance model.json overrides that
+ * a kiosk runtime actually consumes — distinct from the library template's
+ * defaults).
+ */
 export const model = {
   type: "@dougschaefer/appspace-card",
-  version: "2026.04.27.2",
+  version: "2026.05.05.1",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     cardTemplateType: {
@@ -298,6 +399,27 @@ export const model = {
       schema: CardPullSchema,
       lifetime: "infinite",
       garbageCollection: 5,
+    },
+    channel: {
+      description:
+        "Appspace channel — top-level container that publishes content to one or more devices. Has an associated playlist (1:1) of cards/articles.",
+      schema: ChannelSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
+    channelPlaylistItem: {
+      description:
+        "Single item (card content, article, or media) in a channel's playlist. References a contentId whose deployed model.json holds the per-instance configured input values.",
+      schema: ChannelPlaylistItemSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
+    contentModel: {
+      description:
+        "Deployed model.json for a content item — the live per-instance input values as the kiosk runtime sees them. Distinct from the library template's model.json defaults; this captures whatever a user (or the console editor) saved on the content.",
+      schema: ContentModelSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
     },
   },
   methods: {
@@ -781,6 +903,113 @@ export const model = {
             totalBytes,
           },
         );
+        return { dataHandles: [handle] };
+      },
+    },
+
+    inspectChannel: {
+      description:
+        "Probe an Appspace channel and return its metadata, every playlist item, and (when the item is a card) the deployed model.json with the live per-instance input values. Useful for debugging why a card configured in the Appspace console isn't behaving as expected — channel-level card content has its own model.json overrides separate from the library template's defaults, and the only authoritative way to see what a kiosk is actually running with is to fetch that deployed model.",
+      arguments: z.object({
+        channelId: z.string().describe(
+          "Appspace channel UUID (find via the channel's URL in the console, e.g. /channels/<UUID>).",
+        ),
+        includeContentModels: z.boolean().default(true).describe(
+          "When true (default), fetches the deployed model.json for each card item in the playlist. Set false to skip and just return playlist metadata.",
+        ),
+      }),
+      execute: async (args, context) => {
+        const handles = [];
+
+        const channel = await appspaceApi(
+          `/api/v3/channeldirectory/${encodeURIComponent(args.channelId)}`,
+          context.globalArgs,
+        ) as Record<string, unknown>;
+
+        const channelHandle = await context.writeResource(
+          "channel",
+          sanitizeId(args.channelId),
+          channel,
+        );
+        handles.push(channelHandle);
+
+        const playlist = await appspaceApi(
+          `/api/v3/channelplaylist/${encodeURIComponent(args.channelId)}/items`,
+          context.globalArgs,
+        ) as { items?: Array<Record<string, unknown>> } | null;
+
+        const items = playlist?.items ?? [];
+        context.logger.info(
+          "Channel '{name}' ({id}) has {count} playlist item(s)",
+          {
+            name: (channel.name as string) ?? "?",
+            id: args.channelId,
+            count: items.length,
+          },
+        );
+
+        for (const item of items) {
+          const itemHandle = await context.writeResource(
+            "channelPlaylistItem",
+            sanitizeId(item.id as string),
+            item,
+          );
+          handles.push(itemHandle);
+
+          if (
+            args.includeContentModels &&
+            item.type === "Card" &&
+            typeof item.contentURL === "string"
+          ) {
+            try {
+              const modelHandle = await fetchAndStoreContentModel(
+                item.contentId as string,
+                item.contentURL as string,
+                context,
+              );
+              if (modelHandle) handles.push(modelHandle);
+            } catch (err) {
+              context.logger.warning(
+                "Could not fetch deployed model.json for content {id}: {err}",
+                { id: item.contentId as string, err: String(err) },
+              );
+            }
+          }
+        }
+
+        return { dataHandles: handles };
+      },
+    },
+
+    getContentModel: {
+      description:
+        "Fetch the deployed model.json for an Appspace content item — the live per-instance input values, NOT the library template defaults. Looks up the content via libraries/contents to resolve its current contentURL, then fetches the matching model.json. Use this to verify what configuration a kiosk is actually running with when you only have a contentId.",
+      arguments: z.object({
+        contentId: z.string().describe("Appspace content UUID"),
+      }),
+      execute: async (args, context) => {
+        const content = await appspaceApi(
+          `/api/v3/libraries/contents/${encodeURIComponent(args.contentId)}`,
+          context.globalArgs,
+        ) as Record<string, unknown>;
+
+        const contentURL = content.contentURL as string | undefined;
+        if (!contentURL) {
+          throw new Error(
+            `Content ${args.contentId} has no contentURL — cannot resolve deployed model.json.`,
+          );
+        }
+
+        const handle = await fetchAndStoreContentModel(
+          args.contentId,
+          contentURL,
+          context,
+        );
+        if (!handle) {
+          throw new Error(
+            `Failed to fetch model.json for content ${args.contentId} (URL: ${contentURL})`,
+          );
+        }
         return { dataHandles: [handle] };
       },
     },
