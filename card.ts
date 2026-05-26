@@ -363,7 +363,7 @@ async function fetchAndStoreContentModel(
  */
 export const model = {
   type: "@dougschaefer/appspace-card",
-  version: "2026.05.05.1",
+  version: "2026.05.26.1",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     cardTemplateType: {
