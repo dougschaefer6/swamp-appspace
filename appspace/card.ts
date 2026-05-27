@@ -1,5 +1,5 @@
 import { z } from "npm:zod@4.3.6";
-import { zipSync } from "npm:fflate@0.8.2";
+import { unzipSync, zipSync } from "npm:fflate@0.8.2";
 import {
   appspaceApi,
   AppspaceGlobalArgsSchema,
@@ -351,6 +351,38 @@ async function fetchAndStoreContentModel(
 }
 
 /**
+ * Upload-safety check for a card bundle's entry names. Returns the entries that
+ * Appspace will reject. Centralizes the rule so both `package` (self-check on the
+ * in-memory zip) and `verifyPackage` (gate on a built .zip) enforce it identically.
+ *
+ * The original failure (2026-05-27): a nested `console/.swamp/_extension_catalog.db`
+ * shipped in the zip and Appspace's content service 500'd with
+ * "File name [_extension_catalog.db] is not allowed due to invalid file type."
+ * So: never bundle swamp/vcs/OS internals or DB-type files, at ANY depth.
+ */
+const FORBIDDEN_CARD_ENTRY = [
+  /(^|\/)\.swamp(\/|$)/, // swamp catalog/audit dirs (the original culprit)
+  /(^|\/)\.git(\/|$)/,
+  /(^|\/)node_modules(\/|$)/,
+  /(^|\/)\.DS_Store$/,
+  /(^|\/)audit\//, // swamp command-audit logs
+  /_extension_catalog/, // swamp extension catalog db, any extension
+  /\.db(-shm|-wal)?$/i, // Appspace rejects .db file types outright
+];
+function findForbiddenCardEntries(names: string[]): string[] {
+  return names.filter((n) => FORBIDDEN_CARD_ENTRY.some((re) => re.test(n)));
+}
+
+const CardPackageVerificationSchema = z.object({
+  zipPath: z.string(),
+  uploadSafe: z.boolean(),
+  fileCount: z.number(),
+  forbiddenEntries: z.array(z.string()),
+  missingRequired: z.array(z.string()),
+  requiredChecked: z.array(z.string()),
+});
+
+/**
  * `@dougschaefer/appspace-card` model — the custom card development lifecycle
  * for Appspace Cloud v3 plus channel/content inspection. Methods cover
  * scaffolding new card projects, validating the manifest/schema/model trio,
@@ -363,7 +395,7 @@ async function fetchAndStoreContentModel(
  */
 export const model = {
   type: "@dougschaefer/appspace-card",
-  version: "2026.05.27.1",
+  version: "2026.05.27.2",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     cardTemplateType: {
@@ -390,6 +422,13 @@ export const model = {
     cardPackage: {
       description: "Built and zipped card ready to upload to Appspace",
       schema: CardPackageSchema,
+      lifetime: "infinite",
+      garbageCollection: 5,
+    },
+    cardPackageVerification: {
+      description:
+        "Upload-safety verdict for a built card .zip — confirms no swamp/vcs/OS internals or DB-type files (which Appspace rejects with a 500) and that the manifest-referenced files are present at the zip root.",
+      schema: CardPackageVerificationSchema,
       lifetime: "infinite",
       garbageCollection: 5,
     },
@@ -567,7 +606,7 @@ export const model = {
           "dist",
           "SOURCES.md",
         ]).describe(
-          "Top-level entries to skip (matched against the entry name, not full path)",
+          "Entries to skip at ANY depth (matched against the entry name). Appspace rejects .db files, so swamp's nested .swamp/ catalogs must never be bundled.",
         ),
       }),
       execute: async (args, context) => {
@@ -586,8 +625,13 @@ export const model = {
 
         async function walk(dir: string, relPrefix: string) {
           for await (const entry of Deno.readDir(dir)) {
-            // Skip excluded top-level names (and never include the output zip itself)
-            if (relPrefix === "" && excludeSet.has(entry.name)) continue;
+            // Skip excluded names at ANY depth — swamp/vcs/OS junk (.swamp, .git,
+            // node_modules, …) can nest in subfolders, not just the root. Also drop
+            // DB-type files outright: Appspace's content service rejects them
+            // ("File name [_extension_catalog.db] is not allowed due to invalid file
+            // type") and 500s the whole save.
+            if (excludeSet.has(entry.name)) continue;
+            if (/\.db(-shm|-wal)?$/i.test(entry.name)) continue;
             const absPath = `${dir}/${entry.name}`;
             if (absPath === args.outputZip) continue;
 
@@ -609,6 +653,22 @@ export const model = {
         if (!entries["manifest.json"]) {
           throw new Error(
             `No manifest.json found at ${args.sourceDir}/manifest.json — refusing to package.`,
+          );
+        }
+
+        // Self-check: never emit a zip Appspace will reject. Belt-and-suspenders
+        // beyond the exclude list — catches anything that slips past it.
+        const leaked = findForbiddenCardEntries(Object.keys(entries));
+        if (leaked.length > 0) {
+          throw new Error(
+            `Refusing to package ${args.outputZip}: ${leaked.length} forbidden ` +
+              `entr${
+                leaked.length === 1 ? "y" : "ies"
+              } would make Appspace reject ` +
+              `the upload (e.g. swamp internals / .db files): ${
+                leaked.join(", ")
+              }. ` +
+              `Remove these from ${args.sourceDir} (don't run swamp commands inside a card project).`,
           );
         }
 
@@ -640,6 +700,88 @@ export const model = {
             manifestId: manifest.Id as string,
             manifestVersion: manifest.Version as string,
           },
+        );
+        return { dataHandles: [handle] };
+      },
+    },
+
+    verifyPackage: {
+      description:
+        "Gate a built card .zip before upload: fail if it contains swamp/vcs/OS internals or DB-type files (Appspace rejects .db with a 500), or is missing the files the manifest references (Schema/Model/Startup/Thumbnail) at the zip root. Throws on any violation so a build workflow stops before a bad upload. Run after `package`.",
+      arguments: z.object({
+        zipPath: z.string().describe("Path to the built card .zip to verify"),
+      }),
+      execute: async (args, context) => {
+        const bytes = await Deno.readFile(args.zipPath);
+        const files = unzipSync(bytes);
+        const names = Object.keys(files);
+
+        const forbiddenEntries = findForbiddenCardEntries(names);
+
+        // Required files = whatever the manifest points at, checked at the zip root
+        // (the "contents not folder" layout package produces).
+        const requiredChecked: string[] = ["manifest.json"];
+        if (files["manifest.json"]) {
+          try {
+            const mf = JSON.parse(
+              new TextDecoder().decode(files["manifest.json"]),
+            );
+            for (const key of ["Schema", "Model", "Startup", "Thumbnail"]) {
+              const v = mf[key];
+              if (typeof v === "string" && v && !requiredChecked.includes(v)) {
+                requiredChecked.push(v);
+              }
+            }
+          } catch {
+            // manifest unparseable — flagged below as a missing/invalid required file
+          }
+        }
+        const missingRequired = requiredChecked.filter((r) =>
+          !names.includes(r)
+        );
+
+        const uploadSafe = forbiddenEntries.length === 0 &&
+          missingRequired.length === 0;
+
+        const handle = await context.writeResource(
+          "cardPackageVerification",
+          sanitizeId(args.zipPath),
+          {
+            zipPath: args.zipPath,
+            uploadSafe,
+            fileCount: names.length,
+            forbiddenEntries,
+            missingRequired,
+            requiredChecked,
+          },
+        );
+
+        if (!uploadSafe) {
+          const parts: string[] = [];
+          if (forbiddenEntries.length) {
+            parts.push(
+              `forbidden entries Appspace will reject (${forbiddenEntries.length}): ${
+                forbiddenEntries.join(", ")
+              }`,
+            );
+          }
+          if (missingRequired.length) {
+            parts.push(
+              `missing manifest-referenced files at zip root: ${
+                missingRequired.join(", ")
+              }`,
+            );
+          }
+          throw new Error(
+            `Card package ${args.zipPath} is NOT upload-safe — ${
+              parts.join("; ")
+            }. Re-run package after cleaning the source (e.g. stray .swamp/ dirs).`,
+          );
+        }
+
+        context.logger.info(
+          "Card package {zip} is upload-safe: {n} files, 0 forbidden, all required present.",
+          { zip: args.zipPath, n: names.length },
         );
         return { dataHandles: [handle] };
       },
@@ -1019,6 +1161,9 @@ export const model = {
         "Update a configured card template instance (name, model overrides, schema overrides, theme).",
       arguments: z.object({
         id: z.string().describe("Card template instance ID"),
+        cardTemplateTypeId: z.string().optional().describe(
+          "ID of the underlying template type. Required by the PUT endpoint (full-replace); if omitted it is recovered from the existing instance's cardTemplateType.id.",
+        ),
         name: z.string().optional(),
         model: z.record(z.string(), z.unknown()).optional(),
         schema: z.record(z.string(), z.unknown()).optional(),
@@ -1026,6 +1171,9 @@ export const model = {
       }),
       execute: async (args, context) => {
         const body: Record<string, unknown> = {};
+        if (args.cardTemplateTypeId !== undefined) {
+          body.cardTemplateTypeId = args.cardTemplateTypeId;
+        }
         if (args.name !== undefined) body.name = args.name;
         if (args.model !== undefined) body.model = args.model;
         if (args.schema !== undefined) body.schema = args.schema;

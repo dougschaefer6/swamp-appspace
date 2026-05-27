@@ -50,7 +50,7 @@ const TaskDeploymentSchema = z.object({
  */
 export const model = {
   type: "@dougschaefer/appspace-device",
-  version: "2026.05.27.1",
+  version: "2026.05.27.2",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     device: {
