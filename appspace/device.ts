@@ -50,7 +50,7 @@ const TaskDeploymentSchema = z.object({
  */
 export const model = {
   type: "@dougschaefer/appspace-device",
-  version: "2026.05.26.1",
+  version: "2026.05.27.1",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     device: {
@@ -81,6 +81,30 @@ export const model = {
       garbageCollection: 10,
     },
   },
+  checks: {
+    "api-reachable": {
+      description:
+        "Verify the Appspace API is reachable and credentials are valid before executing impactful device operations.",
+      labels: ["live"],
+      appliesTo: ["sendCommand", "createTaskDeployment"],
+      execute: async (context) => {
+        try {
+          await appspaceApi("/api/v3/users/me", context.globalArgs);
+          return { pass: true };
+        } catch (err) {
+          return {
+            pass: false,
+            errors: [
+              `Appspace API not reachable or credentials invalid: ${
+                String(err)
+              }`,
+            ],
+          };
+        }
+      },
+    },
+  },
+
   methods: {
     list: {
       description:
@@ -203,7 +227,7 @@ export const model = {
           name,
           value,
         }));
-        const result = await appspaceApi(
+        await appspaceApi(
           `/api/v3/devices/${encodeURIComponent(args.deviceId)}/properties`,
           context.globalArgs,
           { method: "PUT", body },
@@ -212,16 +236,17 @@ export const model = {
           "Updated {count} properties on device {deviceId}",
           { count: body.length, deviceId: args.deviceId },
         );
-        return {
-          data: {
-            attributes: {
-              deviceId: args.deviceId,
-              updatedKeys: Object.keys(args.properties),
-              result,
-            },
-            name: `set-props-${sanitizeId(args.deviceId)}`,
-          },
-        };
+        // Re-fetch current properties so the resource reflects actual state.
+        const props = await appspaceApi(
+          `/api/v3/devices/${encodeURIComponent(args.deviceId)}/properties`,
+          context.globalArgs,
+        ) as Record<string, unknown>;
+        const handle = await context.writeResource(
+          "deviceProperties",
+          sanitizeId(args.deviceId),
+          { deviceId: args.deviceId, properties: props },
+        );
+        return { dataHandles: [handle] };
       },
     },
 
@@ -234,23 +259,24 @@ export const model = {
         ),
       }),
       execute: async (args, context) => {
-        const result = await appspaceApi(
+        await appspaceApi(
           `/api/v3/devices/${
             encodeURIComponent(args.deviceId)
           }/properties/delete`,
           context.globalArgs,
           { method: "POST", body: args.propertyNames },
         );
-        return {
-          data: {
-            attributes: {
-              deviceId: args.deviceId,
-              deletedKeys: args.propertyNames,
-              result,
-            },
-            name: `del-props-${sanitizeId(args.deviceId)}`,
-          },
-        };
+        // Re-fetch current properties so the resource reflects actual state.
+        const props = await appspaceApi(
+          `/api/v3/devices/${encodeURIComponent(args.deviceId)}/properties`,
+          context.globalArgs,
+        ) as Record<string, unknown>;
+        const handle = await context.writeResource(
+          "deviceProperties",
+          sanitizeId(args.deviceId),
+          { deviceId: args.deviceId, properties: props },
+        );
+        return { dataHandles: [handle] };
       },
     },
 
@@ -450,25 +476,42 @@ export const model = {
         };
         if (args.scheduledAt) body.scheduledAt = args.scheduledAt;
 
-        const result = await appspaceApi(
-          "/api/v3/devices/tasks/deployments",
-          context.globalArgs,
-          { method: "POST", body },
+        let result: Record<string, unknown>;
+        try {
+          result = await appspaceApi(
+            "/api/v3/devices/tasks/deployments",
+            context.globalArgs,
+            { method: "POST", body },
+          ) as Record<string, unknown>;
+          context.logger.info(
+            "Deployed task {tmpl} to {count} {type}(s)",
+            {
+              tmpl: args.taskTemplateId,
+              count: args.targetIds.length,
+              type: args.targetType,
+            },
+          );
+        } catch (e) {
+          const msg = (e as Error).message;
+          if (!msg.includes("409")) throw e;
+          // Already deployed — converge by returning existing deployment info.
+          context.logger.info(
+            "Task deployment for {tmpl} already exists — converging",
+            { tmpl: args.taskTemplateId },
+          );
+          result = {
+            status: "already_exists",
+            taskTemplateId: args.taskTemplateId,
+          };
+        }
+
+        const id = (result.id as string) ?? sanitizeId(args.taskTemplateId);
+        const handle = await context.writeResource(
+          "taskDeployment",
+          sanitizeId(id),
+          { taskTemplateId: args.taskTemplateId, ...result },
         );
-        context.logger.info(
-          "Deployed task {tmpl} to {count} {type}(s)",
-          {
-            tmpl: args.taskTemplateId,
-            count: args.targetIds.length,
-            type: args.targetType,
-          },
-        );
-        return {
-          data: {
-            attributes: { ...args, result },
-            name: `task-deploy-${sanitizeId(args.taskTemplateId)}`,
-          },
-        };
+        return { dataHandles: [handle] };
       },
     },
 

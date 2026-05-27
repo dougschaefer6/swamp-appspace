@@ -1,8 +1,2 @@
 .swamp/
-vaults/
-models/
-workflows/
 *.secret
-node_modules/
-.deno/
-.DS_Store

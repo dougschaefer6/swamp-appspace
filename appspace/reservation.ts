@@ -61,7 +61,7 @@ const ReservableResourceSchema = z.object({
  */
 export const model = {
   type: "@dougschaefer/appspace-reservation",
-  version: "2026.05.26.1",
+  version: "2026.05.27.1",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     event: {
@@ -85,6 +85,39 @@ export const model = {
       garbageCollection: 10,
     },
   },
+  checks: {
+    "api-reachable": {
+      description:
+        "Verify the Appspace API is reachable and credentials are valid before executing mutating reservation operations.",
+      labels: ["live"],
+      appliesTo: [
+        "createReservation",
+        "updateReservation",
+        "deleteReservation",
+        "cancelEvent",
+        "endEvent",
+        "extendEvent",
+        "releaseEvent",
+        "checkinEvent",
+      ],
+      execute: async (context) => {
+        try {
+          await appspaceApi("/api/v3/users/me", context.globalArgs);
+          return { pass: true };
+        } catch (err) {
+          return {
+            pass: false,
+            errors: [
+              `Appspace API not reachable or credentials invalid: ${
+                String(err)
+              }`,
+            ],
+          };
+        }
+      },
+    },
+  },
+
   methods: {
     listEvents: {
       description:
@@ -153,7 +186,7 @@ export const model = {
         reason: z.string().optional(),
       }),
       execute: async (args, context) => {
-        const result = await appspaceApi(
+        await appspaceApi(
           `/api/v3/reservation/events/${
             encodeURIComponent(args.eventId)
           }/cancel`,
@@ -161,12 +194,17 @@ export const model = {
           { method: "POST", body: { reason: args.reason ?? "" } },
         );
         context.logger.info("Cancelled event {id}", { id: args.eventId });
-        return {
-          data: {
-            attributes: { eventId: args.eventId, result },
-            name: `cancel-${sanitizeId(args.eventId)}`,
-          },
-        };
+        // Re-fetch event to store current state.
+        const updated = await appspaceApi(
+          `/api/v3/reservation/events/${encodeURIComponent(args.eventId)}`,
+          context.globalArgs,
+        ) as Record<string, unknown>;
+        const handle = await context.writeResource(
+          "event",
+          sanitizeId(args.eventId),
+          updated,
+        );
+        return { dataHandles: [handle] };
       },
     },
 
@@ -175,17 +213,21 @@ export const model = {
         "End an event early (releases the resource for the remaining duration).",
       arguments: z.object({ eventId: z.string() }),
       execute: async (args, context) => {
-        const result = await appspaceApi(
+        await appspaceApi(
           `/api/v3/reservation/events/${encodeURIComponent(args.eventId)}/end`,
           context.globalArgs,
           { method: "POST" },
         );
-        return {
-          data: {
-            attributes: { eventId: args.eventId, result },
-            name: `end-${sanitizeId(args.eventId)}`,
-          },
-        };
+        const updated = await appspaceApi(
+          `/api/v3/reservation/events/${encodeURIComponent(args.eventId)}`,
+          context.globalArgs,
+        ) as Record<string, unknown>;
+        const handle = await context.writeResource(
+          "event",
+          sanitizeId(args.eventId),
+          updated,
+        );
+        return { dataHandles: [handle] };
       },
     },
 
@@ -196,19 +238,23 @@ export const model = {
         endAt: z.string().describe("New end time (ISO 8601)"),
       }),
       execute: async (args, context) => {
-        const result = await appspaceApi(
+        await appspaceApi(
           `/api/v3/reservation/events/${
             encodeURIComponent(args.eventId)
           }/extend`,
           context.globalArgs,
           { method: "POST", body: { endAt: args.endAt } },
         );
-        return {
-          data: {
-            attributes: { eventId: args.eventId, endAt: args.endAt, result },
-            name: `extend-${sanitizeId(args.eventId)}`,
-          },
-        };
+        const updated = await appspaceApi(
+          `/api/v3/reservation/events/${encodeURIComponent(args.eventId)}`,
+          context.globalArgs,
+        ) as Record<string, unknown>;
+        const handle = await context.writeResource(
+          "event",
+          sanitizeId(args.eventId),
+          updated,
+        );
+        return { dataHandles: [handle] };
       },
     },
 
@@ -216,19 +262,23 @@ export const model = {
       description: "Release resources from an event without cancelling it.",
       arguments: z.object({ eventId: z.string() }),
       execute: async (args, context) => {
-        const result = await appspaceApi(
+        await appspaceApi(
           `/api/v3/reservation/events/${
             encodeURIComponent(args.eventId)
           }/release`,
           context.globalArgs,
           { method: "POST" },
         );
-        return {
-          data: {
-            attributes: { eventId: args.eventId, result },
-            name: `release-${sanitizeId(args.eventId)}`,
-          },
-        };
+        const updated = await appspaceApi(
+          `/api/v3/reservation/events/${encodeURIComponent(args.eventId)}`,
+          context.globalArgs,
+        ) as Record<string, unknown>;
+        const handle = await context.writeResource(
+          "event",
+          sanitizeId(args.eventId),
+          updated,
+        );
+        return { dataHandles: [handle] };
       },
     },
 
@@ -236,19 +286,23 @@ export const model = {
       description: "Check in to an event (confirm occupancy).",
       arguments: z.object({ eventId: z.string() }),
       execute: async (args, context) => {
-        const result = await appspaceApi(
+        await appspaceApi(
           `/api/v3/reservation/events/${
             encodeURIComponent(args.eventId)
           }/checkin`,
           context.globalArgs,
           { method: "POST" },
         );
-        return {
-          data: {
-            attributes: { eventId: args.eventId, result },
-            name: `checkin-${sanitizeId(args.eventId)}`,
-          },
-        };
+        const updated = await appspaceApi(
+          `/api/v3/reservation/events/${encodeURIComponent(args.eventId)}`,
+          context.globalArgs,
+        ) as Record<string, unknown>;
+        const handle = await context.writeResource(
+          "event",
+          sanitizeId(args.eventId),
+          updated,
+        );
+        return { dataHandles: [handle] };
       },
     },
 
@@ -346,11 +400,27 @@ export const model = {
           }));
         }
 
-        const result = await appspaceApi(
-          "/api/v3/reservation/reservations",
-          context.globalArgs,
-          { method: "POST", body },
-        ) as Record<string, unknown>;
+        let result: Record<string, unknown>;
+        try {
+          result = await appspaceApi(
+            "/api/v3/reservation/reservations",
+            context.globalArgs,
+            { method: "POST", body },
+          ) as Record<string, unknown>;
+        } catch (e) {
+          const msg = (e as Error).message;
+          if (!msg.includes("409")) throw e;
+          // Reservation already exists for this slot — treat as converged.
+          context.logger.info(
+            "Reservation for {title} at {startAt} already exists — converging",
+            { title: args.title, startAt: args.startAt },
+          );
+          result = {
+            title: args.title,
+            startAt: args.startAt,
+            status: "already_exists",
+          };
+        }
 
         const id = (result.id as string) ?? "new";
         context.logger.info("Created reservation {id}: {title}", {
@@ -382,19 +452,26 @@ export const model = {
           if (v !== undefined) body[k] = v;
         }
 
-        const result = await appspaceApi(
+        await appspaceApi(
           `/api/v3/reservation/reservations/${
             encodeURIComponent(reservationId)
           }`,
           context.globalArgs,
           { method: "PATCH", body },
         );
-        return {
-          data: {
-            attributes: { reservationId, patch: body, result },
-            name: `update-${sanitizeId(reservationId)}`,
-          },
-        };
+        // Re-fetch to store current reservation state.
+        const updated = await appspaceApi(
+          `/api/v3/reservation/reservations/${
+            encodeURIComponent(reservationId)
+          }`,
+          context.globalArgs,
+        ) as Record<string, unknown>;
+        const handle = await context.writeResource(
+          "reservation",
+          sanitizeId(reservationId),
+          updated,
+        );
+        return { dataHandles: [handle] };
       },
     },
 

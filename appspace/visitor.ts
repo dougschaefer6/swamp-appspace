@@ -53,7 +53,7 @@ const InvitationSchema = z.object({
  */
 export const model = {
   type: "@dougschaefer/appspace-visitor",
-  version: "2026.05.26.1",
+  version: "2026.05.27.1",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     visitor: {
@@ -77,6 +77,30 @@ export const model = {
       garbageCollection: 10,
     },
   },
+  checks: {
+    "api-reachable": {
+      description:
+        "Verify the Appspace API is reachable and credentials are valid before executing mutating visitor operations.",
+      labels: ["live"],
+      appliesTo: ["delete"],
+      execute: async (context) => {
+        try {
+          await appspaceApi("/api/v3/users/me", context.globalArgs);
+          return { pass: true };
+        } catch (err) {
+          return {
+            pass: false,
+            errors: [
+              `Appspace API not reachable or credentials invalid: ${
+                String(err)
+              }`,
+            ],
+          };
+        }
+      },
+    },
+  },
+
   methods: {
     list: {
       description: "Query the visitor list with optional filtering.",
@@ -147,15 +171,32 @@ export const model = {
           visitorType: args.visitorType,
           customFields: args.customFields,
         };
-        const created = await appspaceApi(
-          "/api/v3/visitormanagement/visitors",
-          context.globalArgs,
-          { method: "POST", body },
-        ) as Record<string, unknown>;
-        context.logger.info(
-          "Created visitor {id}: {name}",
-          { id: created.id, name: created.fullName ?? args.email },
-        );
+        let created: Record<string, unknown>;
+        try {
+          created = await appspaceApi(
+            "/api/v3/visitormanagement/visitors",
+            context.globalArgs,
+            { method: "POST", body },
+          ) as Record<string, unknown>;
+          context.logger.info(
+            "Created visitor {id}: {name}",
+            { id: created.id, name: created.fullName ?? args.email },
+          );
+        } catch (e) {
+          const msg = (e as Error).message;
+          if (!msg.includes("409")) throw e;
+          // Visitor with this email already exists — converge on existing.
+          context.logger.info(
+            "Visitor {email} already exists — converging on existing record",
+            { email: args.email },
+          );
+          created = {
+            firstName: args.firstName,
+            lastName: args.lastName,
+            email: args.email,
+            visitorType: args.visitorType,
+          };
+        }
         const handle = await context.writeResource(
           "visitor",
           sanitizeId(args.email),
@@ -355,19 +396,25 @@ export const model = {
         visitorId: z.string(),
       }),
       execute: async (args, context) => {
-        const result = await appspaceApi(
+        await appspaceApi(
           `/api/v3/visitormanagement/events/${
             encodeURIComponent(args.eventId)
           }/visitors/${encodeURIComponent(args.visitorId)}/checkin`,
           context.globalArgs,
           { method: "POST" },
         );
-        return {
-          data: {
-            attributes: { ...args, result },
-            name: `checkin-${sanitizeId(args.visitorId)}`,
-          },
-        };
+        // Re-fetch the visitor so the resource reflects the updated state.
+        const updated = await appspaceApi(
+          `/api/v3/visitormanagement/visitors/${
+            encodeURIComponent(args.visitorId)
+          }`,
+          context.globalArgs,
+        ) as Record<string, unknown>;
+        const name = sanitizeId(
+          (updated.email as string) ?? (updated.id as string) ?? args.visitorId,
+        );
+        const handle = await context.writeResource("visitor", name, updated);
+        return { dataHandles: [handle] };
       },
     },
 
@@ -378,19 +425,25 @@ export const model = {
         visitorId: z.string(),
       }),
       execute: async (args, context) => {
-        const result = await appspaceApi(
+        await appspaceApi(
           `/api/v3/visitormanagement/events/${
             encodeURIComponent(args.eventId)
           }/visitors/${encodeURIComponent(args.visitorId)}/checkout`,
           context.globalArgs,
           { method: "POST" },
         );
-        return {
-          data: {
-            attributes: { ...args, result },
-            name: `checkout-${sanitizeId(args.visitorId)}`,
-          },
-        };
+        // Re-fetch the visitor so the resource reflects the updated state.
+        const updated = await appspaceApi(
+          `/api/v3/visitormanagement/visitors/${
+            encodeURIComponent(args.visitorId)
+          }`,
+          context.globalArgs,
+        ) as Record<string, unknown>;
+        const name = sanitizeId(
+          (updated.email as string) ?? (updated.id as string) ?? args.visitorId,
+        );
+        const handle = await context.writeResource("visitor", name, updated);
+        return { dataHandles: [handle] };
       },
     },
   },
