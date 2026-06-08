@@ -202,6 +202,46 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   await Deno.writeTextFile(path, JSON.stringify(value, null, 2) + "\n");
 }
 
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await Deno.stat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve a headless Chromium/Chrome/Edge binary for rendering card-layout
+ * screenshots. Mirrors the resolution approach in the openai-document model
+ * but covers macOS app bundles too. Order: explicit `SWAMP_CHROMIUM_BIN`
+ * override, then the per-OS install locations, then a PATH name fallback.
+ */
+async function resolveBrowserBin(override?: string): Promise<string> {
+  const env = override || Deno.env.get("SWAMP_CHROMIUM_BIN");
+  if (env) return env;
+  const candidates = [
+    // macOS app bundles
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    // Linux
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    // Windows-via-WSL
+    "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe",
+    "/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+  ];
+  for (const c of candidates) {
+    if (await pathExists(c)) return c;
+  }
+  // Last resort: a bare name Deno.Command will resolve on PATH (caller verifies
+  // the screenshot file actually appeared).
+  return "google-chrome";
+}
+
 function validateBigThree(
   manifest: Record<string, unknown>,
   schema: Record<string, unknown>,
@@ -379,7 +419,21 @@ const CardPackageVerificationSchema = z.object({
   fileCount: z.number(),
   forbiddenEntries: z.array(z.string()),
   missingRequired: z.array(z.string()),
+  missingReferencedAssets: z.array(z.string()),
   requiredChecked: z.array(z.string()),
+});
+
+const CardScreenshotsSchema = z.object({
+  sourceDir: z.string(),
+  outputDir: z.string(),
+  browser: z.string(),
+  sizes: z.array(z.string()),
+  screenshots: z.array(z.object({
+    screen: z.string(),
+    size: z.string(),
+    path: z.string(),
+    rendered: z.boolean(),
+  })),
 });
 
 /**
@@ -395,7 +449,7 @@ const CardPackageVerificationSchema = z.object({
  */
 export const model = {
   type: "@dougschaefer/appspace-card",
-  version: "2026.05.27.2",
+  version: "2026.06.08.1",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     cardTemplateType: {
@@ -436,6 +490,13 @@ export const model = {
       description:
         "Source files pulled from a card's templateUrl on the Appspace tenant — manifest, schema, model, index.html, and all referenced JS/CSS/asset bundles",
       schema: CardPullSchema,
+      lifetime: "infinite",
+      garbageCollection: 5,
+    },
+    cardScreenshots: {
+      description:
+        "Layout screenshots rendered from a card project's harness/ fixtures via a headless browser — for eyeballing spacing/alignment/responsive behavior without the Appspace runtime.",
+      schema: CardScreenshotsSchema,
       lifetime: "infinite",
       garbageCollection: 5,
     },
@@ -605,6 +666,7 @@ export const model = {
           ".DS_Store",
           "dist",
           "SOURCES.md",
+          "harness",
         ]).describe(
           "Entries to skip at ANY depth (matched against the entry name). Appspace rejects .db files, so swamp's nested .swamp/ catalogs must never be bundled.",
         ),
@@ -740,8 +802,47 @@ export const model = {
           !names.includes(r)
         );
 
+        // Also fail if the Startup HTML references a script/stylesheet that
+        // isn't in the bundle. The manifest only names Schema/Model/Startup/
+        // Thumbnail, so a card that shipped WITHOUT its platform bundles
+        // (app-*.js, components/*, templates-*.js) still passed every check
+        // above — but those 404 on the device, AngularJS never boots, and the
+        // card renders blank. Parse index.html's <script src>/<link href> refs
+        // to console/ and components/ (.js/.css only — images/fonts can be
+        // loaded dynamically and be legitimately absent, e.g. splashscreens)
+        // and require each to be present at the zip root.
+        const missingReferencedAssets: string[] = [];
+        let startupName = "index.html";
+        if (files["manifest.json"]) {
+          try {
+            const mf = JSON.parse(
+              new TextDecoder().decode(files["manifest.json"]),
+            );
+            if (typeof mf.Startup === "string" && mf.Startup) {
+              startupName = mf.Startup;
+            }
+          } catch {
+            // handled via missingRequired above
+          }
+        }
+        if (files[startupName]) {
+          const html = new TextDecoder().decode(files[startupName]);
+          const refRe =
+            /(?:src|href)\s*=\s*["']((?:\.\/)?(?:console|components)\/[^"']+\.(?:js|css))["']/gi;
+          const seen = new Set<string>();
+          let m: RegExpExecArray | null;
+          while ((m = refRe.exec(html)) !== null) {
+            const p = m[1].replace(/^\.\//, "");
+            if (!seen.has(p)) {
+              seen.add(p);
+              if (!names.includes(p)) missingReferencedAssets.push(p);
+            }
+          }
+        }
+
         const uploadSafe = forbiddenEntries.length === 0 &&
-          missingRequired.length === 0;
+          missingRequired.length === 0 &&
+          missingReferencedAssets.length === 0;
 
         const handle = await context.writeResource(
           "cardPackageVerification",
@@ -752,6 +853,7 @@ export const model = {
             fileCount: names.length,
             forbiddenEntries,
             missingRequired,
+            missingReferencedAssets,
             requiredChecked,
           },
         );
@@ -772,6 +874,13 @@ export const model = {
               }`,
             );
           }
+          if (missingReferencedAssets.length) {
+            parts.push(
+              `index.html references scripts/styles missing from the bundle (${missingReferencedAssets.length}) — the card will render BLANK on the device: ${
+                missingReferencedAssets.join(", ")
+              }. The platform bundles are gitignored; refetch them into the source before packaging (see the card's SOURCES.md "Building").`,
+            );
+          }
           throw new Error(
             `Card package ${args.zipPath} is NOT upload-safe — ${
               parts.join("; ")
@@ -782,6 +891,112 @@ export const model = {
         context.logger.info(
           "Card package {zip} is upload-safe: {n} files, 0 forbidden, all required present.",
           { zip: args.zipPath, n: names.length },
+        );
+        return { dataHandles: [handle] };
+      },
+    },
+
+    renderScreens: {
+      description:
+        "Render a card project's harness HTML fixtures (in <sourceDir>/harness/*.html) to PNG screenshots at one or more viewport sizes via a headless browser. Lets you eyeball a kiosk card's layout/spacing/responsive behavior WITHOUT the Appspace runtime — the harness files mirror the card's screens with the real CSS (they typically <link> the card's official CSS bundles and load its patch JS for the injected styles). The bare template-type preview in the Appspace console can't render a kiosk card (no per-instance model or device session), so this is the way to visually check layout before upload. Author the harness fixtures alongside the card and keep them in sync with the templates.",
+      arguments: z.object({
+        sourceDir: z.string().describe(
+          "Card project directory (must contain a harness/ subfolder of .html fixtures)",
+        ),
+        outputDir: z.string().optional().describe(
+          "Where to write PNGs (default <sourceDir>/harness/screenshots)",
+        ),
+        sizes: z.array(z.string()).optional().describe(
+          'Viewport sizes as WxH, e.g. ["1920x1080","3840x2160","1080x1920"]. Default: 1080p, 4K, and portrait tablet.',
+        ),
+        browserBin: z.string().optional().describe(
+          "Override the headless browser binary (else SWAMP_CHROMIUM_BIN, then per-OS auto-resolution).",
+        ),
+      }),
+      execute: async (args, context) => {
+        const harnessDir = `${args.sourceDir}/harness`;
+        if (!(await pathExists(harnessDir))) {
+          throw new Error(
+            `No harness/ directory at ${harnessDir} — author per-screen HTML fixtures there first (see the card's SOURCES.md).`,
+          );
+        }
+        const absHarness = await Deno.realPath(harnessDir);
+        const htmls: string[] = [];
+        for await (const entry of Deno.readDir(harnessDir)) {
+          if (entry.isFile && entry.name.endsWith(".html")) {
+            htmls.push(entry.name);
+          }
+        }
+        if (htmls.length === 0) {
+          throw new Error(`No .html fixtures found in ${harnessDir}.`);
+        }
+        htmls.sort();
+
+        const sizes = (args.sizes && args.sizes.length)
+          ? args.sizes
+          : ["1920x1080", "3840x2160", "1080x1920"];
+        const outputDir = args.outputDir ?? `${harnessDir}/screenshots`;
+        await Deno.mkdir(outputDir, { recursive: true });
+        const absOut = await Deno.realPath(outputDir);
+        const bin = await resolveBrowserBin(args.browserBin);
+
+        const screenshots: {
+          screen: string;
+          size: string;
+          path: string;
+          rendered: boolean;
+        }[] = [];
+        for (const htmlName of htmls) {
+          const screen = htmlName.replace(/\.html$/, "");
+          for (const size of sizes) {
+            const [w, h] = size.split("x");
+            if (!w || !h) {
+              throw new Error(`Invalid size "${size}" — expected WxH.`);
+            }
+            const out = `${absOut}/${screen}-${w}x${h}.png`;
+            await new Deno.Command(bin, {
+              args: [
+                "--headless=new",
+                "--disable-gpu",
+                "--no-sandbox",
+                "--hide-scrollbars",
+                "--force-device-scale-factor=1",
+                `--screenshot=${out}`,
+                `--window-size=${w},${h}`,
+                `file://${absHarness}/${htmlName}`,
+              ],
+              stdout: "null",
+              stderr: "null",
+            }).output();
+            const rendered = await pathExists(out);
+            screenshots.push({ screen, size, path: out, rendered });
+            context.logger.info(
+              "rendered {screen} @ {size} -> {ok}",
+              { screen, size, ok: rendered ? out : "FAILED" },
+            );
+          }
+        }
+
+        const failed = screenshots.filter((s) => !s.rendered);
+        const handle = await context.writeResource(
+          "cardScreenshots",
+          sanitizeId(args.sourceDir),
+          {
+            sourceDir: args.sourceDir,
+            outputDir: absOut,
+            browser: bin,
+            sizes,
+            screenshots,
+          },
+        );
+        if (failed.length) {
+          throw new Error(
+            `Headless render produced no PNG for ${failed.length} of ${screenshots.length} screen/size combos (browser: ${bin}). Check the browser binary or set SWAMP_CHROMIUM_BIN.`,
+          );
+        }
+        context.logger.info(
+          "Rendered {n} screenshot(s) from {dir} to {out}",
+          { n: screenshots.length, dir: harnessDir, out: absOut },
         );
         return { dataHandles: [handle] };
       },
