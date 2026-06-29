@@ -53,7 +53,7 @@ const InvitationSchema = z.object({
  */
 export const model = {
   type: "@dougschaefer/appspace-visitor",
-  version: "2026.06.08.1",
+  version: "2026.06.29.1",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     visitor: {
@@ -254,10 +254,18 @@ export const model = {
         email: z.string(),
         company: z.string().optional(),
         notes: z.string().optional(),
-        hostUserId: z.string().describe(
-          "Appspace user UUID who hosts the drop-in (receives notification)",
+        hostUserId: z.string().optional().describe(
+          "Appspace user UUID who hosts the drop-in (receives notification). Optional — omit to test whether an email-only host is accepted.",
         ),
-        hostEmail: z.string().describe("Same user's email"),
+        hostEmail: z.string().describe("Host's email"),
+        additionalHosts: z.array(
+          z.object({
+            userId: z.string().optional(),
+            email: z.string(),
+          }),
+        ).default([]).describe(
+          "Extra recipients to notify (e.g. facilitators / front desk). Each gets the same host notification. userId optional.",
+        ),
         resourceId: z.string().optional().describe(
           "Optional reservation resource UUID (routes to that resource's Concierges)",
         ),
@@ -269,6 +277,10 @@ export const model = {
         timezone: z.string().default("UTC").describe(
           "IANA timezone for the invitation (e.g. 'America/New_York'). Default 'UTC'.",
         ),
+        invitationType: z.enum(["DropIn", "Planned"]).default("DropIn")
+          .describe(
+            "Invitation type. 'DropIn' is the eventless walk-in (host notified, no arrival/check-in). 'Planned' is a scheduled invitation that generates a check-in-able event.",
+          ),
       }),
       execute: async (args, context) => {
         // Step 1: Create the visitor (or recover existing on 409)
@@ -318,12 +330,21 @@ export const model = {
           startAt.getTime() + args.durationMinutes * 60 * 1000,
         );
 
+        // A host entry carries userId when known; email-only is allowed so
+        // facilitators can be added without looking up each UUID.
+        const toHost = (userId: string | undefined, email: string) =>
+          userId ? { userId, email } : { email };
+        const hosts = [
+          toHost(args.hostUserId, args.hostEmail),
+          ...args.additionalHosts.map((h) => toHost(h.userId, h.email)),
+        ];
+
         const inviteBody = {
-          type: "DropIn",
+          type: args.invitationType,
           title: `Walk-in: ${fullName}${titleSuffix}`,
           notes: noteParts.join("\n"),
           purpose: args.purpose,
-          hosts: [{ userId: args.hostUserId, email: args.hostEmail }],
+          hosts,
           resourceIds: args.resourceId ? [args.resourceId] : [],
           visitors: [visitor],
           startAt: startAt.toISOString(),

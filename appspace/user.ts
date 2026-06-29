@@ -41,7 +41,7 @@ const UserGroupSchema = z.object({
  */
 export const model = {
   type: "@dougschaefer/appspace-user",
-  version: "2026.06.08.1",
+  version: "2026.06.29.1",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     user: {
