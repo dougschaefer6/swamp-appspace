@@ -449,7 +449,7 @@ const CardScreenshotsSchema = z.object({
  */
 export const model = {
   type: "@dougschaefer/appspace-card",
-  version: "2026.06.29.1",
+  version: "2026.07.06.1",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     cardTemplateType: {
@@ -731,6 +731,32 @@ export const model = {
                 leaked.join(", ")
               }. ` +
               `Remove these from ${args.sourceDir} (don't run swamp commands inside a card project).`,
+          );
+        }
+
+        // Self-check: every .json entry must actually be valid JSON. Guards
+        // against a bad fetch/curl (e.g. a 404 error page saved with a .json
+        // extension) silently riding along into the bundle — the same failure
+        // class as the forbidden-entry check above, just for corrupted content
+        // instead of disallowed file types.
+        const invalidJson: string[] = [];
+        for (const [name, data] of Object.entries(entries)) {
+          if (!name.endsWith(".json")) continue;
+          try {
+            JSON.parse(new TextDecoder().decode(data));
+          } catch {
+            invalidJson.push(name);
+          }
+        }
+        if (invalidJson.length > 0) {
+          throw new Error(
+            `Refusing to package ${args.outputZip}: ${invalidJson.length} .json ` +
+              `entr${
+                invalidJson.length === 1 ? "y is" : "ies are"
+              } not valid JSON ` +
+              `(likely a saved error response or truncated fetch): ${
+                invalidJson.join(", ")
+              }. Remove or refetch these from ${args.sourceDir}.`,
           );
         }
 
@@ -1162,7 +1188,10 @@ export const model = {
           relPath: string,
           required: boolean,
         ): Promise<Uint8Array | null> {
-          const url = templateUrl + relPath;
+          const url = new URL(
+            templateUrl + relPath,
+            context.globalArgs.baseUrl as string,
+          );
           const resp = await fetch(url);
           if (!resp.ok) {
             if (required) {
