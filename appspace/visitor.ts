@@ -53,7 +53,7 @@ const InvitationSchema = z.object({
  */
 export const model = {
   type: "@dougschaefer/appspace-visitor",
-  version: "2026.07.06.1",
+  version: "2026.07.30.1",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     visitor: {

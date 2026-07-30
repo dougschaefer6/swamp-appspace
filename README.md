@@ -175,7 +175,7 @@ through `$timeout(0)` after Angular bootstrap (catches the late-DOM cases).
 ### 5. Hidden v3 endpoints
 
 The public OpenAPI at `/api/v3/<service>/openapi` significantly
-underrepresents the API surface. Notable hidden endpoints we discovered by
+underrepresents the API surface. Notable hidden endpoints I found by
 reading the bundled JS:
 
 - `POST /api/v3/visitormanagement/visitors` — create a visitor (OpenAPI only
