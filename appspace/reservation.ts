@@ -6,6 +6,9 @@ import {
   sanitizeId,
 } from "./_client.ts";
 
+// Shape of a method's raw API result, kept as returned.
+const MethodResultSchema = z.object({}).passthrough();
+
 const ResourceRefSchema = z.object({
   resourceId: z.string(),
   resourceName: z.string().optional(),
@@ -61,9 +64,33 @@ const ReservableResourceSchema = z.object({
  */
 export const model = {
   type: "@dougschaefer/appspace-reservation",
-  version: "2026.10.08.1",
+  version: "2026.10.08.2",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
+    schedule: {
+      description: "Schedule for a resource over a time window",
+      schema: MethodResultSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
+    userAvailability: {
+      description: "Free/busy availability for the requested users",
+      schema: MethodResultSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
+    myEvents: {
+      description: "Events for the authenticated user",
+      schema: MethodResultSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
+    reservationDeletion: {
+      description: "Result of deleting a reservation",
+      schema: MethodResultSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
     event: {
       description:
         "Reservation event — a scheduled instance bound to one or more resources, possibly synced from an external calendar provider",
@@ -489,12 +516,12 @@ export const model = {
         context.logger.info("Deleted reservation {id}", {
           id: args.reservationId,
         });
-        return {
-          data: {
-            attributes: { reservationId: args.reservationId, result },
-            name: `delete-${sanitizeId(args.reservationId)}`,
-          },
-        };
+        const handle = await context.writeResource(
+          "reservationDeletion",
+          `delete-${sanitizeId(args.reservationId)}`,
+          { reservationId: args.reservationId, result },
+        );
+        return { dataHandles: [handle] };
       },
     },
 
@@ -555,12 +582,12 @@ export const model = {
           context.globalArgs,
           { params },
         );
-        return {
-          data: {
-            attributes: { events },
-            name: "my-events",
-          },
-        };
+        const handle = await context.writeResource(
+          "myEvents",
+          "my-events",
+          { events },
+        );
+        return { dataHandles: [handle] };
       },
     },
 
@@ -585,12 +612,12 @@ export const model = {
             },
           },
         );
-        return {
-          data: {
-            attributes: { ...args, result },
-            name: "user-availability",
-          },
-        };
+        const handle = await context.writeResource(
+          "userAvailability",
+          "user-availability",
+          { ...args, result },
+        );
+        return { dataHandles: [handle] };
       },
     },
 
@@ -615,12 +642,12 @@ export const model = {
             },
           },
         );
-        return {
-          data: {
-            attributes: { ...args, schedule: result },
-            name: "schedule",
-          },
-        };
+        const handle = await context.writeResource(
+          "schedule",
+          "schedule",
+          { ...args, schedule: result },
+        );
+        return { dataHandles: [handle] };
       },
     },
   },

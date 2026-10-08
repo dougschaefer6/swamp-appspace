@@ -7,6 +7,9 @@ import {
   sanitizeId,
 } from "./_client.ts";
 
+// Shape of a method's raw API result, kept as returned.
+const MethodResultSchema = z.object({}).passthrough();
+
 const CardTemplateTypeSchema = z.object({
   id: z.string(),
   key: z.string(),
@@ -32,6 +35,13 @@ const CardProjectSchema = z.object({
   schemaValid: z.boolean(),
   modelValid: z.boolean(),
   warnings: z.array(z.string()),
+}).passthrough();
+
+const CardBuildSchema = z.object({
+  path: z.string(),
+  command: z.string(),
+  stdout: z.string(),
+  stderr: z.string(),
 }).passthrough();
 
 const CardPackageSchema = z.object({
@@ -98,6 +108,8 @@ const MANIFEST_TEMPLATE = (id: string, name: string, developer: string) => ({
   BaseCardTemplate: false,
 });
 
+// Input names are lowercase: CardAPI lower-cases names when it resolves
+// ${model.<name>} and getModelProperty, and Appspace's own cards follow suit.
 const SCHEMA_TEMPLATE = {
   version: "1.0.0",
   inputs: [
@@ -106,24 +118,39 @@ const SCHEMA_TEMPLATE = {
       label: "Headline",
       type: "textbox",
       placeholder: "Enter headline",
+      value: "",
+      locked: false,
       validation: { required: true },
     },
     {
-      name: "backgroundColor",
+      name: "backgroundcolor",
       label: "Background Color",
       type: "colorpicker",
+      value: "",
+      locked: false,
     },
   ],
 };
 
+// model.json uses the ARRAY form. The player delivers models to cards as
+// [{name, type, value}], and CardAPI iterates model.inputs as an array, so an
+// object keyed by input name breaks getModelProperty and ${model.x}.
 const MODEL_TEMPLATE = {
-  inputs: {
-    headline: { value: "Hello from Appspace" },
-    backgroundColor: { value: "#0F4C81" },
-  },
-  customData: {},
+  inputs: [
+    { name: "headline", type: "textbox", value: "Hello from Appspace" },
+    { name: "backgroundcolor", type: "colorpicker", value: "#0F4C81" },
+  ],
 };
 
+// Vendor scripts the card loads from console/. cardapi.js is Appspace's
+// runtime library and cannot be redistributed here; SOURCES.md says where to
+// get both. verifyPackage refuses a zip that is missing either.
+const CARD_API_SCRIPT = "console/cardapi.js";
+const JQUERY_SCRIPT = "console/jquery-3.7.1.min.js";
+
+// Follows CardAPI v1.8.x: the global $cardApi, subscribeModelUpdate before
+// init(), then notifyOnLoad once ready. Values arrive already substituted, so
+// a "${property.<key>}" typed into an input is the device's value here.
 const INDEX_HTML_TEMPLATE = `<!doctype html>
 <html lang="en">
 <head>
@@ -131,40 +158,66 @@ const INDEX_HTML_TEMPLATE = `<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Card</title>
   <style>
-    body { margin: 0; font-family: Arial, sans-serif; height: 100vh; display: flex; align-items: center; justify-content: center; }
+    html, body { margin: 0; height: 100%; overflow: hidden; }
+    body { font-family: Arial, sans-serif; display: flex; align-items: center; justify-content: center; background: #0F4C81; }
     h1 { font-size: 5vw; color: #fff; text-align: center; padding: 0 5vw; }
   </style>
 </head>
 <body>
   <h1 id="headline">Loading...</h1>
+  <script src="${JQUERY_SCRIPT}"></script>
+  <script src="${CARD_API_SCRIPT}"></script>
   <script>
     (function () {
-      function applyModel(model) {
-        var inputs = (model && model.inputs) || {};
-        document.body.style.backgroundColor =
-          (inputs.backgroundColor && inputs.backgroundColor.value) || "#0F4C81";
-        document.getElementById("headline").textContent =
-          (inputs.headline && inputs.headline.value) || "Headline";
-      }
-      function init() {
-        if (window.CardAPI) {
-          var api = new window.CardAPI();
-          api.subscribe(applyModel);
-          api.notifyOnLoad();
-        } else {
-          // Local dev fallback (Chrome-Safe shortcut not in use)
-          fetch("model.json").then(function (r) { return r.json(); }).then(applyModel);
+      "use strict";
+
+      function inputValue(model, name) {
+        var inputs = (model && model.inputs) || [];
+        for (var i = 0; i < inputs.length; i++) {
+          if (String(inputs[i].name).toLowerCase() === name) {
+            return inputs[i].value;
+          }
         }
+        return undefined;
       }
-      if (document.readyState === "loading") {
-        document.addEventListener("DOMContentLoaded", init);
-      } else {
-        init();
+
+      function applyModel(model) {
+        document.body.style.backgroundColor =
+          inputValue(model, "backgroundcolor") || "#0F4C81";
+        document.getElementById("headline").textContent =
+          inputValue(model, "headline") || "Headline";
       }
+
+      var api = window.$cardApi;
+      if (!api) {
+        // Opened outside Appspace without console/cardapi.js: render defaults.
+        fetch("model.json").then(function (r) { return r.json(); }).then(applyModel);
+        return;
+      }
+
+      api.subscribeModelUpdate(applyModel);
+      api.init();
+      api.isReady().then(function () {
+        applyModel(api.getModel());
+        api.notifyOnLoad();
+      });
     })();
   </script>
 </body>
 </html>
+`;
+
+const SOURCES_MD_TEMPLATE = `# Card file provenance
+
+Two scripts in \`console/\` are not generated by the scaffold and must be added
+before \`package\`. \`verifyPackage\` fails if either is missing from the zip.
+
+| File | Where to get it |
+|---|---|
+| \`${CARD_API_SCRIPT}\` | Appspace's CardAPI library. Copy it from any card already on your tenant: \`listTemplates\`, then \`pullCard\` one of Appspace's stock cards, and take its \`cardapi.js\`. |
+| \`${JQUERY_SCRIPT}\` | jQuery 3.7.1, which CardAPI requires: https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js |
+
+\`package\` leaves this file out of the zip.
 `;
 
 const THUMBNAIL_SVG =
@@ -290,9 +343,11 @@ function validateBigThree(
     }
 
     // Golden Rule: every schema input must exist in model.inputs.
-    // model.json supports two shapes for `inputs`:
-    //   (a) array form  → [{name, type, value}, ...]   (used by Appspace's own cards)
-    //   (b) object form → {<name>: {value}, ...}       (the simpler scaffolded form)
+    // Appspace's cards and the player use the array form
+    // [{name, type, value}, ...]. An object keyed by input name is still read
+    // here so the Golden Rule can be checked, but it is flagged: CardAPI
+    // iterates model.inputs as an array, so ${model.x} and getModelProperty
+    // silently find nothing.
     const rawModelInputs = model.inputs;
     let modelInputNames: Set<string>;
     if (Array.isArray(rawModelInputs)) {
@@ -306,6 +361,9 @@ function validateBigThree(
       );
     } else if (rawModelInputs && typeof rawModelInputs === "object") {
       modelInputNames = new Set(Object.keys(rawModelInputs));
+      warnings.push(
+        "model.json 'inputs' is an object keyed by name; Appspace and CardAPI expect an array of {name,type,value}",
+      );
     } else {
       warnings.push(
         "model.json 'inputs' must be either an array of {name,type,value} or an object keyed by input name",
@@ -449,9 +507,16 @@ const CardScreenshotsSchema = z.object({
  */
 export const model = {
   type: "@dougschaefer/appspace-card",
-  version: "2026.10.08.1",
+  version: "2026.10.08.2",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
+    templateUpdate: {
+      description:
+        "Result of a card template update: the patch sent and the API response",
+      schema: MethodResultSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
     cardTemplateType: {
       description:
         "Registered card template type — the developer-uploaded card 'class' that instances are created from",
@@ -465,6 +530,12 @@ export const model = {
       schema: CardTemplateSchema,
       lifetime: "infinite",
       garbageCollection: 10,
+    },
+    cardBuild: {
+      description: "Output of a card project's build command",
+      schema: CardBuildSchema,
+      lifetime: "infinite",
+      garbageCollection: 5,
     },
     cardProject: {
       description:
@@ -525,7 +596,7 @@ export const model = {
   methods: {
     scaffold: {
       description:
-        "Create a new Appspace card project at the given path with manifest.json, schema.json, model.json, index.html, and a placeholder thumbnail. Defaults to a plain HTML/JS template (zero build step) — extend with React/Angular as needed.",
+        "Create a new Appspace card project at the given path: manifest.json, schema.json, array-form model.json, an index.html wired to CardAPI ($cardApi, subscribeModelUpdate, init, notifyOnLoad), a placeholder thumbnail, and SOURCES.md. Add console/cardapi.js (from a stock card via pullCard) and console/jquery-3.7.1.min.js before packaging; SOURCES.md says where to get them. Plain HTML/JS with no build step.",
       arguments: z.object({
         path: z.string().describe(
           "Destination directory (created if missing). Should be empty.",
@@ -553,11 +624,20 @@ export const model = {
           `${args.path}/thumbnail.svg`,
           THUMBNAIL_SVG,
         );
+        await Deno.writeTextFile(
+          `${args.path}/SOURCES.md`,
+          SOURCES_MD_TEMPLATE,
+        );
+        await Deno.mkdir(`${args.path}/console`, { recursive: true });
 
         context.logger.info("Scaffolded card {id} at {path}", {
           id: args.id,
           path: args.path,
         });
+        context.logger.info(
+          "Before packaging, add {cardApi} and {jquery}; see SOURCES.md",
+          { cardApi: CARD_API_SCRIPT, jquery: JQUERY_SCRIPT },
+        );
 
         const handle = await context.writeResource(
           "cardProject",
@@ -633,17 +713,17 @@ export const model = {
           );
         }
         context.logger.info("Build succeeded in {path}", { path: args.path });
-        return {
-          data: {
-            attributes: {
-              path: args.path,
-              command: `${args.command} ${args.args.join(" ")}`,
-              stdout: result.stdout,
-              stderr: result.stderr,
-            },
-            name: "build-output",
+        const handle = await context.writeResource(
+          "cardBuild",
+          sanitizeId(args.path),
+          {
+            path: args.path,
+            command: `${args.command} ${args.args.join(" ")}`,
+            stdout: result.stdout,
+            stderr: result.stderr,
           },
-        };
+        );
+        return { dataHandles: [handle] };
       },
     },
 
@@ -1428,12 +1508,12 @@ export const model = {
           context.globalArgs,
           { method: "PUT", body },
         );
-        return {
-          data: {
-            attributes: { id: args.id, patch: body, result },
-            name: `update-${sanitizeId(args.id)}`,
-          },
-        };
+        const handle = await context.writeResource(
+          "templateUpdate",
+          `update-${sanitizeId(args.id)}`,
+          { id: args.id, patch: body, result },
+        );
+        return { dataHandles: [handle] };
       },
     },
   },

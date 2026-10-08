@@ -6,6 +6,9 @@ import {
   sanitizeId,
 } from "./_client.ts";
 
+// Shape of a method's raw API result, kept as returned.
+const MethodResultSchema = z.object({}).passthrough();
+
 const DeviceSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -171,9 +174,33 @@ const TaskDeploymentSchema = z.object({
  */
 export const model = {
   type: "@dougschaefer/appspace-device",
-  version: "2026.10.08.1",
+  version: "2026.10.08.2",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
+    taskResponses: {
+      description: "Task responses reported by a device",
+      schema: MethodResultSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
+    deviceIntegrations: {
+      description: "Integrations pre-deployed to devices",
+      schema: MethodResultSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
+    deviceSync: {
+      description: "Result of a device sync request",
+      schema: MethodResultSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
+    deviceStatuses: {
+      description: "Online/offline status for the tenant's devices",
+      schema: MethodResultSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
     device: {
       description:
         "Appspace-managed display device with location, group, channel, and runtime status",
@@ -334,12 +361,12 @@ export const model = {
           context.globalArgs,
           { params },
         );
-        return {
-          data: {
-            attributes: { statuses },
-            name: "device-statuses",
-          },
-        };
+        const handle = await context.writeResource(
+          "deviceStatuses",
+          "device-statuses",
+          { statuses },
+        );
+        return { dataHandles: [handle] };
       },
     },
 
@@ -585,12 +612,12 @@ export const model = {
         context.logger.info("Triggered sync on {count} devices", {
           count: args.deviceIds.length,
         });
-        return {
-          data: {
-            attributes: { deviceIds: args.deviceIds, result },
-            name: "sync-result",
-          },
-        };
+        const handle = await context.writeResource(
+          "deviceSync",
+          "sync-result",
+          { deviceIds: args.deviceIds, result },
+        );
+        return { dataHandles: [handle] };
       },
     },
 
@@ -603,12 +630,12 @@ export const model = {
           "/api/v3/devices/integrations",
           context.globalArgs,
         );
-        return {
-          data: {
-            attributes: { integrations },
-            name: "integrations",
-          },
-        };
+        const handle = await context.writeResource(
+          "deviceIntegrations",
+          "integrations",
+          { integrations },
+        );
+        return { dataHandles: [handle] };
       },
     },
 
@@ -725,12 +752,12 @@ export const model = {
           context.globalArgs,
           { params },
         );
-        return {
-          data: {
-            attributes: { deviceId: args.deviceId, responses },
-            name: `task-responses-${sanitizeId(args.deviceId)}`,
-          },
-        };
+        const handle = await context.writeResource(
+          "taskResponses",
+          `task-responses-${sanitizeId(args.deviceId)}`,
+          { deviceId: args.deviceId, responses },
+        );
+        return { dataHandles: [handle] };
       },
     },
   },

@@ -183,7 +183,7 @@ function errorSummary(body: unknown): string | null {
  */
 export const model = {
   type: "@dougschaefer/appspace-platform",
-  version: "2026.10.08.1",
+  version: "2026.10.08.2",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     serviceSpec: {

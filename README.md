@@ -271,12 +271,26 @@ Every card requires three JSON files plus an `index.html` entry point:
   textstyle, background, label, text, tagsinput, textarea), input grouping,
   conditional visibility (`conditions` DSL), validation, and separate
   `editor`/`themeeditor` views.
-- `model.json` — default values matching schema input names. The Golden Rule:
-  every named schema input must have a matching `model.inputs.<name>.value`.
+- `model.json` — default values matching schema input names, as an array of
+  `{name, type, value}`. The Golden Rule: every named schema input needs a
+  matching entry in `model.inputs`. Use the array form; the player delivers
+  models that way and CardAPI iterates `model.inputs` as an array, so an object
+  keyed by input name silently breaks `${model.<name>}` lookups. `validate`
+  flags the object form.
 
 The scaffold method emits a minimal vanilla-HTML/JS card that needs no build
-step. Add a React or Angular layer if your card grows beyond a couple of
-inputs.
+step. Its `index.html` uses CardAPI the way Appspace's own cards do: the global
+`$cardApi`, `subscribeModelUpdate` registered before `init()`, then
+`notifyOnLoad()` once `isReady()` resolves. Input values arrive with any
+`${property.<key>}` tokens already replaced.
+
+Appspace's own cards bundle CardAPI rather than relying on the player to inject
+it, and it needs jQuery. The scaffold therefore loads `console/cardapi.js` and
+`console/jquery-3.7.1.min.js` and writes a `SOURCES.md` saying where to get
+them: `cardapi.js` from any of Appspace's stock cards via `pullCard`, and
+jQuery from cdnjs. I don't redistribute `cardapi.js` here because it's
+Appspace's code. `verifyPackage` refuses a zip whose `index.html` references a
+`console/` script that isn't in it, so a card can't ship without them.
 
 ### Player Properties (per-device and per-location values)
 

@@ -6,6 +6,9 @@ import {
   sanitizeId,
 } from "./_client.ts";
 
+// Shape of a method's raw API result, kept as returned.
+const MethodResultSchema = z.object({}).passthrough();
+
 const VisitorSchema = z.object({
   id: z.string(),
   firstName: z.string().optional(),
@@ -53,9 +56,15 @@ const InvitationSchema = z.object({
  */
 export const model = {
   type: "@dougschaefer/appspace-visitor",
-  version: "2026.10.08.1",
+  version: "2026.10.08.2",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
+    visitorDeletion: {
+      description: "Result of deleting a visitor",
+      schema: MethodResultSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
     visitor: {
       description: "Visitor record in the Appspace Visitor Management system",
       schema: VisitorSchema,
@@ -218,12 +227,12 @@ export const model = {
           { method: "DELETE" },
         );
         context.logger.info("Deleted visitor {id}", { id: args.id });
-        return {
-          data: {
-            attributes: { id: args.id, result },
-            name: `delete-${sanitizeId(args.id)}`,
-          },
-        };
+        const handle = await context.writeResource(
+          "visitorDeletion",
+          `delete-${sanitizeId(args.id)}`,
+          { id: args.id, result },
+        );
+        return { dataHandles: [handle] };
       },
     },
 
