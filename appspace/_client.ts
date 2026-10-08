@@ -164,3 +164,54 @@ export async function appspacePaged(
 export function sanitizeId(id: string): string {
   return id.toLowerCase().replace(/[^a-z0-9-]/g, "-");
 }
+
+export interface RawGetResult {
+  status: number;
+  contentType: string;
+  body: unknown;
+}
+
+/**
+ * Read-only GET that never throws on HTTP status — used by discovery and
+ * probe methods that need to record 401/403/404/405 as evidence rather than
+ * fail. The method is hard-wired to GET; there is no way to pass another
+ * verb through this helper.
+ */
+export async function appspaceGetRaw(
+  path: string,
+  g: AppspaceGlobalArgs,
+  options: { authenticated?: boolean; timeoutMs?: number } = {},
+): Promise<RawGetResult> {
+  const url = new URL(path, g.baseUrl);
+  if (url.origin !== new URL(g.baseUrl).origin) {
+    throw new Error(`Refusing cross-origin GET to ${url.origin}`);
+  }
+  const headers: Record<string, string> = { "Accept": "application/json" };
+  if (options.authenticated !== false) {
+    headers["Authorization"] = `Bearer ${await getAccessToken(g)}`;
+  }
+  let resp: Response;
+  try {
+    resp = await fetch(url.toString(), {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(options.timeoutMs ?? 20_000),
+    });
+  } catch (err) {
+    // Status 0 = no HTTP response (timeout, reset, DNS) — recorded, not thrown.
+    return { status: 0, contentType: "", body: String(err) };
+  }
+  const contentType = resp.headers.get("content-type") ?? "";
+  const text = await resp.text();
+  let body: unknown = text;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+  } else {
+    body = null;
+  }
+  return { status: resp.status, contentType, body };
+}

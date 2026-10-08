@@ -449,7 +449,7 @@ const CardScreenshotsSchema = z.object({
  */
 export const model = {
   type: "@dougschaefer/appspace-card",
-  version: "2026.07.30.1",
+  version: "2026.10.08.1",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     cardTemplateType: {

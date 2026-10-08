@@ -10,7 +10,7 @@ customization).
 
 | Model | Purpose | Methods |
 |---|---|---|
-| `@dougschaefer/appspace-device` | Manage Appspace-managed display devices | list, get, getStatuses, getProperties, setProperties, deleteProperties, sendCommand, getConfiguration, screenCapture, listGroups, sync, listIntegrations, listTaskDeployments, createTaskDeployment, getTaskResponses |
+| `@dougschaefer/appspace-device` | Manage Appspace-managed display devices | list, get, getStatuses, getProperties, setProperties, deleteProperties, getLocationProperties, setLocationProperties, sendCommand, getConfiguration, screenCapture, listGroups, sync, listIntegrations, listTaskDeployments, createTaskDeployment, getTaskResponses |
 | `@dougschaefer/appspace-reservation` | Room reservations, events, resources | listEvents, getEvent, cancelEvent, endEvent, extendEvent, releaseEvent, checkinEvent, listReservations, getReservation, createReservation, updateReservation, deleteReservation, listReservableResources, getMyEvents, checkUserAvailability, getSchedule |
 | `@dougschaefer/appspace-user` | User directory + groups | list, get, findByEmail, me, listGroups, getGroupMembers |
 | `@dougschaefer/appspace-visitor` | Visitor Management + walk-in DropIn workflow | list, get, create, delete, getConfiguration, createDropInInvitation, listEvents, checkin, checkout |
@@ -278,24 +278,47 @@ The scaffold method emits a minimal vanilla-HTML/JS card that needs no build
 step. Add a React or Angular layer if your card grows beyond a couple of
 inputs.
 
-### Player Properties (per-device overrides)
+### Player Properties (per-device and per-location values)
 
-Cards can read per-device key/value overrides at runtime via `model.playerProperties`.
-The `appspace-device` model's `setProperties` method sets these — useful for
-storing API credentials or content URLs that vary by location:
+Player Properties are key/value pairs set on a device or on a location. A device
+inherits every property on its location unless it sets the same key itself. At
+playback the player hands them to the card in CardAPI's `api.init` message as
+`config.properties`, and CardAPI replaces any `${property.<key>}` token in the
+card's input values before the card sees them. The key match is
+case-insensitive. A key the device doesn't have is left in place as literal
+text, so a card that depends on one should check for an unresolved token.
+
+That makes one card serve many sites. A Web View card whose address is
+`https://dashboards.example.com/site?id=${property.site_id}` loads a different
+page on every display, driven only by each location's `site_id`. I verified this
+on Samsung Tizen players with the stock Web View card.
+
+Set them with the `appspace-device` model:
 
 ```bash
+# one display
 swamp model method run my-device setProperties --input '{
   "deviceId": "<uuid>",
-  "properties": {
-    "datasourceurl": "https://signage.example.com/lobby-feed.json",
-    "appspace.api.baseurl": "https://appNN.cloud.appspace.com"
-  }
+  "properties": { "site_id": "1042" }
+}'
+
+# every display in a location inherits this
+swamp model method run my-device setLocationProperties --input '{
+  "locationId": "<location uuid>",
+  "properties": { "site_id": "1042" }
 }'
 ```
 
-Property names are **case-sensitive and always lowercase** even when the schema
-uses camelCase.
+Both writes merge, so keys you don't name are left alone. `getProperties`
+returns everything a device resolves, including inherited and account-default
+values; each item's `origin.type` says whether it comes from the `Device` or a
+`Network` (location).
+
+These methods use `/api/v3/networks/devices/{id}/properties` and
+`/api/v3/networks/{id}/properties`, which is what the Appspace console calls.
+The documented `/api/v3/devices/{id}/properties` returned 400 on every verb on
+the tenant I tested against. `deleteProperties` is not supported yet because I
+haven't confirmed the delete call; remove properties in the console for now.
 
 ## Service availability
 

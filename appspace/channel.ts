@@ -129,7 +129,7 @@ function instanceName(
  */
 export const model = {
   type: "@dougschaefer/appspace-channel",
-  version: "2026.07.30.1",
+  version: "2026.10.08.1",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     channel: {

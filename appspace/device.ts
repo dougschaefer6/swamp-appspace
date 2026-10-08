@@ -32,6 +32,127 @@ const DeviceGroupSchema = z.object({
 const DevicePropertiesSchema = z.object({
   deviceId: z.string(),
   properties: z.record(z.string(), z.unknown()),
+  items: z.array(z.record(z.string(), z.unknown())).optional(),
+  truncated: z.boolean().optional(),
+}).passthrough();
+
+const PropertyItemSchema = z.object({
+  key: z.string(),
+  value: z.unknown(),
+  disabled: z.boolean().optional(),
+  origin: z.object({
+    id: z.string().optional(),
+    type: z.string().optional(),
+    isOverridden: z.boolean().optional(),
+  }).passthrough().optional(),
+}).passthrough();
+
+const LocationPropertiesSchema = z.object({
+  locationId: z.string(),
+  properties: z.record(z.string(), z.unknown()),
+  items: z.array(PropertyItemSchema),
+  truncated: z.boolean(),
+}).passthrough();
+
+// Player Properties live under the networks service, not /devices. The
+// documented /api/v3/devices/{id}/properties answers 400 on every verb; the
+// console reads and writes /api/v3/networks/devices/{id}/properties (device)
+// and /api/v3/networks/{id}/properties (location). Captured 2026-10-08.
+function devicePropertiesPath(deviceId: string): string {
+  return `/api/v3/networks/devices/${encodeURIComponent(deviceId)}/properties`;
+}
+
+function locationPropertiesPath(locationId: string): string {
+  return `/api/v3/networks/${encodeURIComponent(locationId)}/properties`;
+}
+
+const PROPERTY_PAGE_LIMIT = 999;
+
+// The console reads properties in one 999-item page. A device or location
+// with that many keys is implausible, but report it rather than drop keys.
+async function readProperties(
+  path: string,
+  g: z.infer<typeof AppspaceGlobalArgsSchema>,
+): Promise<{
+  items: Array<z.infer<typeof PropertyItemSchema>>;
+  truncated: boolean;
+}> {
+  const body = await appspaceApi(path, g, {
+    params: {
+      sort: "key",
+      start: 0,
+      limit: PROPERTY_PAGE_LIMIT,
+      pagecount: PROPERTY_PAGE_LIMIT,
+    },
+  }) as { items?: Array<z.infer<typeof PropertyItemSchema>> };
+  const items = body.items ?? [];
+  return { items, truncated: items.length >= PROPERTY_PAGE_LIMIT };
+}
+
+async function mergeProperties(
+  path: string,
+  properties: Record<string, string>,
+  g: z.infer<typeof AppspaceGlobalArgsSchema>,
+): Promise<void> {
+  await appspaceApi(path, g, {
+    method: "PUT",
+    body: {
+      properties: Object.entries(properties).map(([key, value]) => ({
+        key,
+        value,
+      })),
+      mode: "Merge",
+    },
+  });
+}
+
+function removeProperties(
+  path: string,
+  keys: string[],
+  g: z.infer<typeof AppspaceGlobalArgsSchema>,
+): never {
+  // The delete call has not been captured from the console yet. Both
+  // `POST {path}/delete` (400) and `DELETE {path}/{key}` (404) were tried
+  // against a live device on 2026-10-08. Fail loudly rather than guess at
+  // shapes, since a wrong guess against the bare path could clear every key.
+  void path;
+  void g;
+  throw new Error(
+    `Deleting properties (${
+      keys.join(", ")
+    }) is not supported yet: the console's delete request has not been captured. Remove them in the Appspace console for now.`,
+  );
+}
+
+// `properties` is a plain key → value map for CEL; `items` keeps origin so
+// callers can tell a device's own value from one inherited from a location.
+function summarizeProperties(
+  read: {
+    items: Array<z.infer<typeof PropertyItemSchema>>;
+    truncated: boolean;
+  },
+) {
+  return {
+    properties: Object.fromEntries(read.items.map((i) => [i.key, i.value])),
+    items: read.items,
+    truncated: read.truncated,
+  };
+}
+
+const DeviceCommandSchema = z.object({
+  deviceId: z.string(),
+  command: z.string(),
+  result: z.unknown(),
+}).passthrough();
+
+const DeviceConfigurationSchema = z.object({
+  deviceId: z.string(),
+  configuration: z.unknown(),
+}).passthrough();
+
+const DeviceScreenCaptureSchema = z.object({
+  deviceId: z.string(),
+  capture: z.unknown(),
 }).passthrough();
 
 const TaskDeploymentSchema = z.object({
@@ -50,7 +171,7 @@ const TaskDeploymentSchema = z.object({
  */
 export const model = {
   type: "@dougschaefer/appspace-device",
-  version: "2026.07.30.1",
+  version: "2026.10.08.1",
   globalArguments: AppspaceGlobalArgsSchema,
   resources: {
     device: {
@@ -73,6 +194,31 @@ export const model = {
       lifetime: "infinite",
       garbageCollection: 10,
     },
+    locationProperties: {
+      description:
+        "Player Properties defined on a location (network); devices in the location inherit them",
+      schema: LocationPropertiesSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
+    deviceCommand: {
+      description: "Result of a one-shot command sent to a device",
+      schema: DeviceCommandSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
+    deviceConfiguration: {
+      description: "Runtime configuration the player reports for a device",
+      schema: DeviceConfigurationSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
+    deviceScreenCapture: {
+      description: "Latest screen capture metadata (image URL) for a device",
+      schema: DeviceScreenCaptureSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
     taskDeployment: {
       description:
         "Task deployed to a device, group, or location (firmware update, command, etc.)",
@@ -86,7 +232,12 @@ export const model = {
       description:
         "Verify the Appspace API is reachable and credentials are valid before executing impactful device operations.",
       labels: ["live"],
-      appliesTo: ["sendCommand", "createTaskDeployment"],
+      appliesTo: [
+        "sendCommand",
+        "createTaskDeployment",
+        "setProperties",
+        "setLocationProperties",
+      ],
       execute: async (context) => {
         try {
           await appspaceApi("/api/v3/users/me", context.globalArgs);
@@ -194,20 +345,19 @@ export const model = {
 
     getProperties: {
       description:
-        "Get all Player Properties for a device. These are key/value pairs used to override card configuration per device (e.g., API credentials, datasourceurl).",
+        "Get every Player Property a device resolves, including ones inherited from its location or the account. Each item's origin.type says where the value comes from (Device, Network, or the account default).",
       arguments: z.object({
         deviceId: z.string().describe("Device ID"),
       }),
       execute: async (args, context) => {
-        const props = await appspaceApi(
-          `/api/v3/devices/${encodeURIComponent(args.deviceId)}/properties`,
+        const read = await readProperties(
+          devicePropertiesPath(args.deviceId),
           context.globalArgs,
-        ) as Record<string, unknown>;
-
+        );
         const handle = await context.writeResource(
           "deviceProperties",
           sanitizeId(args.deviceId),
-          { deviceId: args.deviceId, properties: props },
+          { deviceId: args.deviceId, ...summarizeProperties(read) },
         );
         return { dataHandles: [handle] };
       },
@@ -215,36 +365,31 @@ export const model = {
 
     setProperties: {
       description:
-        "Upsert one or more Player Properties on a device. Property names must be lowercase and case-sensitive.",
+        "Add or update Player Properties on a device (merge — properties not named are left alone). Keys keep the casing you send; cards match ${property.<key>} case-insensitively.",
       arguments: z.object({
         deviceId: z.string().describe("Device ID"),
         properties: z.record(z.string(), z.string()).describe(
-          "Map of property name (lowercase) → value",
+          "Map of property key → value",
         ),
       }),
       execute: async (args, context) => {
-        const body = Object.entries(args.properties).map(([name, value]) => ({
-          name,
-          value,
-        }));
-        await appspaceApi(
-          `/api/v3/devices/${encodeURIComponent(args.deviceId)}/properties`,
+        await mergeProperties(
+          devicePropertiesPath(args.deviceId),
+          args.properties,
           context.globalArgs,
-          { method: "PUT", body },
         );
-        context.logger.info(
-          "Updated {count} properties on device {deviceId}",
-          { count: body.length, deviceId: args.deviceId },
-        );
-        // Re-fetch current properties so the resource reflects actual state.
-        const props = await appspaceApi(
-          `/api/v3/devices/${encodeURIComponent(args.deviceId)}/properties`,
+        context.logger.info("Merged {count} properties on device {id}", {
+          count: Object.keys(args.properties).length,
+          id: args.deviceId,
+        });
+        const read = await readProperties(
+          devicePropertiesPath(args.deviceId),
           context.globalArgs,
-        ) as Record<string, unknown>;
+        );
         const handle = await context.writeResource(
           "deviceProperties",
           sanitizeId(args.deviceId),
-          { deviceId: args.deviceId, properties: props },
+          { deviceId: args.deviceId, ...summarizeProperties(read) },
         );
         return { dataHandles: [handle] };
       },
@@ -255,26 +400,75 @@ export const model = {
       arguments: z.object({
         deviceId: z.string().describe("Device ID"),
         propertyNames: z.array(z.string()).describe(
-          "Property names to delete",
+          "Property keys to delete",
         ),
       }),
       execute: async (args, context) => {
-        await appspaceApi(
-          `/api/v3/devices/${
-            encodeURIComponent(args.deviceId)
-          }/properties/delete`,
+        removeProperties(
+          devicePropertiesPath(args.deviceId),
+          args.propertyNames,
           context.globalArgs,
-          { method: "POST", body: args.propertyNames },
         );
-        // Re-fetch current properties so the resource reflects actual state.
-        const props = await appspaceApi(
-          `/api/v3/devices/${encodeURIComponent(args.deviceId)}/properties`,
+        const read = await readProperties(
+          devicePropertiesPath(args.deviceId),
           context.globalArgs,
-        ) as Record<string, unknown>;
+        );
         const handle = await context.writeResource(
           "deviceProperties",
           sanitizeId(args.deviceId),
-          { deviceId: args.deviceId, properties: props },
+          { deviceId: args.deviceId, ...summarizeProperties(read) },
+        );
+        return { dataHandles: [handle] };
+      },
+    },
+
+    getLocationProperties: {
+      description:
+        "Get the Player Properties defined on a location (network). Devices assigned to the location inherit them unless they override the key.",
+      arguments: z.object({
+        locationId: z.string().describe("Location (network) ID"),
+      }),
+      execute: async (args, context) => {
+        const read = await readProperties(
+          locationPropertiesPath(args.locationId),
+          context.globalArgs,
+        );
+        const handle = await context.writeResource(
+          "locationProperties",
+          sanitizeId(args.locationId),
+          { locationId: args.locationId, ...summarizeProperties(read) },
+        );
+        return { dataHandles: [handle] };
+      },
+    },
+
+    setLocationProperties: {
+      description:
+        "Add or update Player Properties on a location (merge). Every device in the location inherits them unless it overrides the key.",
+      arguments: z.object({
+        locationId: z.string().describe("Location (network) ID"),
+        properties: z.record(z.string(), z.string()).describe(
+          "Map of property key → value",
+        ),
+      }),
+      execute: async (args, context) => {
+        await mergeProperties(
+          locationPropertiesPath(args.locationId),
+          args.properties,
+          context.globalArgs,
+        );
+        context.logger.info("Merged {count} properties on location {id}", {
+          count: Object.keys(args.properties).length,
+          id: args.locationId,
+        });
+        const read = await readProperties(
+          locationPropertiesPath(args.locationId),
+          context.globalArgs,
+        );
+        const handle = await context.writeResource(
+          "locationProperties",
+          sanitizeId(args.locationId),
+          { locationId: args.locationId, ...summarizeProperties(read) },
         );
         return { dataHandles: [handle] };
       },
@@ -305,16 +499,12 @@ export const model = {
           cmd: args.command,
           id: args.deviceId,
         });
-        return {
-          data: {
-            attributes: {
-              deviceId: args.deviceId,
-              command: args.command,
-              result,
-            },
-            name: `cmd-${args.command}-${sanitizeId(args.deviceId)}`,
-          },
-        };
+        const handle = await context.writeResource(
+          "deviceCommand",
+          `cmd-${args.command}-${sanitizeId(args.deviceId)}`,
+          { deviceId: args.deviceId, command: args.command, result },
+        );
+        return { dataHandles: [handle] };
       },
     },
 
@@ -328,12 +518,12 @@ export const model = {
           `/api/v3/devices/${encodeURIComponent(args.deviceId)}/configuration`,
           context.globalArgs,
         );
-        return {
-          data: {
-            attributes: { deviceId: args.deviceId, configuration: config },
-            name: `config-${sanitizeId(args.deviceId)}`,
-          },
-        };
+        const handle = await context.writeResource(
+          "deviceConfiguration",
+          `config-${sanitizeId(args.deviceId)}`,
+          { deviceId: args.deviceId, configuration: config },
+        );
+        return { dataHandles: [handle] };
       },
     },
 
@@ -345,15 +535,17 @@ export const model = {
       }),
       execute: async (args, context) => {
         const capture = await appspaceApi(
-          `/api/v3/devices/${encodeURIComponent(args.deviceId)}/screencapture`,
+          `/api/v3/networks/devices/${
+            encodeURIComponent(args.deviceId)
+          }/screencapture`,
           context.globalArgs,
         );
-        return {
-          data: {
-            attributes: { deviceId: args.deviceId, capture },
-            name: `screen-${sanitizeId(args.deviceId)}`,
-          },
-        };
+        const handle = await context.writeResource(
+          "deviceScreenCapture",
+          `screen-${sanitizeId(args.deviceId)}`,
+          { deviceId: args.deviceId, capture },
+        );
+        return { dataHandles: [handle] };
       },
     },
 
